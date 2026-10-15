@@ -1,6 +1,6 @@
 {
   "name": "readyroom",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "An MCP server that lets coding agents request a human decision without hijacking whichever window is focused. Agents enqueue a ticket; the human drains the queue from one page when they choose to.",
   "type": "module",
   "keywords": [
