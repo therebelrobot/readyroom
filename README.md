@@ -240,6 +240,160 @@ the stream is required and comes from the path segment or an explicit `stream` t
 If neither is present, the tool call fails with an error naming both ways to supply it. No
 default is invented.
 
+## MCP Configuration
+
+An MCP client reaches readyroom over one of two transports. How you run the server decides
+which one is available.
+
+### Entry points
+
+| Command | Target | Transports | State |
+|---|---|---|---|
+| `npx readyroom` | Node, on the host | stdio + Streamable HTTP | `./.state` on disk |
+| `npm start` (`node dist/server.mjs`) | Node, built bundle | stdio + Streamable HTTP | `./.state` on disk |
+| `npm run dev` (`tsx watch --import ./scripts/html-loader-register.mjs src/index.ts`) | Node, development | stdio + Streamable HTTP | `./.state` on disk |
+| `docker run … ghcr.io/therebelrobot/readyroom:latest` | Docker | stdio + Streamable HTTP | volume mount |
+| `npm run dev:worker` (`wrangler dev`) | Cloudflare Worker, local | Streamable HTTP only | Durable Object |
+| `npm run deploy:worker` (`wrangler deploy`) | Cloudflare Worker, edge | Streamable HTTP only | Durable Object |
+
+On the Node targets a process resolves into a **daemon** or a **client** (see
+[the singleton](#three-ways-aboard)): the first process becomes the daemon and serves both
+transports on the port; later processes join as clients and serve stdio only, proxying their
+tool calls to the daemon. The role is decided at start — there is nothing to configure.
+
+### Transports
+
+- **stdio** — Node targets only. The MCP client spawns the process and speaks the protocol over
+  its file descriptors. The server writes nothing to stdout but MCP frames; all logs go to
+  stderr. Select it by configuring the client to run a `command`.
+- **Streamable HTTP** — every target. On Node the daemon mounts it at `POST /mcp` (methods
+  `GET`, `POST`, `DELETE`) on the same port. On the Worker it is the only transport, mounted at
+  `/mcp` (stream supplied as the `/mcp/{stream}` path segment). Select it by pointing the client at the URL.
+
+The two are not exclusive on Node: one daemon serves stdio and HTTP at once, so one agent can
+run over stdio and another over HTTP against the same queue.
+
+#### The `/mcp` endpoint is Origin-guarded
+
+Both HTTP mounts reject a request whose `Origin` header is missing or not on the allowlist,
+with `403`. On Node the allowlist is built from the server's own origins — `http://127.0.0.1:<port>`
+and `http://localhost:<port>` — plus any `READYROOM_ALLOWED_ORIGINS` entries. On the Worker it
+is the Worker's own origin plus the same extras. See `src/security.ts`.
+
+> [!NOTE]
+> An HTTP MCP client must send an `Origin` header that matches the allowlist. A client that
+> sends no `Origin` at all is rejected. If your client sends a different origin (or none), add
+> it to `READYROOM_ALLOWED_ORIGINS`.
+
+#### Streams over HTTP
+
+On Node the stream defaults to `READYROOM_STREAM`, else `basename(cwd)`, and can be overridden
+per call with the `stream` tool argument. On the Worker there is no `cwd`: the stream comes from
+the `POST /mcp/{stream}` path segment, or an explicit `stream` argument. If neither is present,
+the call fails with an error naming both ways to supply it.
+
+### Configuration options
+
+All six are read from the process environment on the Node targets, and, on the Worker, only
+`READYROOM_TOKEN` and `READYROOM_ALLOWED_ORIGINS` are read from `[vars]` / `secrets` in
+`wrangler.toml`. `src/config.ts` is the single source of truth.
+
+| Variable | Default | Required? | Meaning |
+|---|---|---|---|
+| `READYROOM_STREAM` | `basename(cwd)` | optional | Default stream for tickets. Overridable per call via the `stream` tool argument. Not applicable on the Worker. |
+| `READYROOM_TOKEN` | *(unset)* | **mandatory on Docker and the Worker**, optional on Node | Shared secret for `/api/*` and the Node `/internal/tool-call` proxy. |
+| `READYROOM_BIND` | `127.0.0.1` | optional | Bind address. A non-loopback value refuses to start unless `READYROOM_TOKEN` is set. Not applicable on the Worker. |
+| `READYROOM_STATE_DIR` | `./.state` | optional | Directory holding `tickets.json`, `audit.jsonl`, and `daemon.json`. Not applicable on the Worker. |
+| `READYROOM_PORT` | `8971` | optional | TCP port. Must not collide with 3000-3899, which a worktree helper allocates. Not applicable on the Worker. |
+| `READYROOM_ALLOWED_ORIGINS` | *(unset)* | optional | Comma-separated extra origins allowed on the `/mcp` Origin guard, appended to the server's own origin. |
+
+The per-target Worker mapping is in [Environment variables](#environment-variables).
+
+### MCP client configuration
+
+#### stdio (Claude Desktop and other MCP clients)
+
+```json
+{
+  "mcpServers": {
+    "readyroom": {
+      "command": "npx",
+      "args": ["-y", "readyroom"],
+      "env": {
+        "READYROOM_STREAM": "my-agent",
+        "READYROOM_STATE_DIR": "/home/you/.readyroom"
+      }
+    }
+  }
+}
+```
+
+Every client that spawns readyroom becomes the daemon or a client automatically; you do not set
+the role. Give each agent its own stream with `READYROOM_STREAM` (or the `stream` argument to
+`ask_human`). If any process in a shared daemon group sets `READYROOM_TOKEN`, every process in
+that group must set the same value — the client forwards it to the daemon.
+
+For a built or installed copy, replace `command` with the absolute path to `dist/server.mjs`
+(or the `readyroom` binary on `PATH`).
+
+#### Streamable HTTP (Node daemon)
+
+```json
+{
+  "mcpServers": {
+    "readyroom": {
+      "url": "http://127.0.0.1:8971/mcp",
+      "headers": {
+        "Origin": "http://127.0.0.1:8971"
+      }
+    }
+  }
+}
+```
+
+#### Streamable HTTP (Cloudflare Worker)
+
+The stream is the path segment, so each agent gets its own URL.
+
+```json
+{
+  "mcpServers": {
+    "readyroom": {
+      "url": "https://readyroom.example.com/mcp/my-agent",
+      "headers": {
+        "Origin": "https://readyroom.example.com"
+      }
+    }
+  }
+}
+```
+
+### Auth and secrets
+
+`src/security.ts` holds both guards.
+
+- **`READYROOM_TOKEN`** protects `/api/*` (the page's API) and, on Node, the `/internal/tool-call`
+  proxy between a client process and its daemon. The comparison is constant-time via the shared
+  `src/core/constantTimeEqual.ts`, so Node and the Worker get the identical guarantee.
+- **The `/mcp` MCP endpoint is guarded by the `Origin` header, not by the token.** A missing or
+  mismatched `Origin` is rejected with `403`; the MCP specification requires this of HTTP
+  transports. `READYROOM_ALLOWED_ORIGINS` extends that allowlist.
+- On Docker and the Worker the token is **mandatory**. On Node it is optional for a loopback
+  bind and mandatory for any non-loopback bind — the refusal rule in `src/config.ts` enforces it.
+
+> [!NOTE]
+> `src/config.ts` and the [Environment variables](#environment-variables) table describe
+> `READYROOM_TOKEN` as the secret for "the MCP endpoint". In the shipped code the token is
+> enforced on `/api/*` (and the Node `/internal/tool-call` proxy) only; the `/mcp` endpoint is
+> authenticated by its `Origin` guard instead. This section documents the code's actual behavior.
+
+##### A note on secrets
+
+Treat `READYROOM_TOKEN` as a bearer secret. On the Worker, set it with
+`wrangler secret put READYROOM_TOKEN` and never commit it. On Docker and npx, supply it through
+an `--env-file` or your process manager, not a shell history. Never expose the server to a
+public network directly — see [Never expose this to a public network directly](#never-expose-this-to-a-public-network-directly).
+
 ## Environment variables
 
 Five variables, plus one optional extra.
