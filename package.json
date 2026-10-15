@@ -21,6 +21,10 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/therebelrobot/readyroom.git"
+  },
   "files": [
     "dist",
     "README.md",
@@ -43,7 +47,7 @@
     "release:minor": "npm version minor -m \"chore: release v%s\" && git push && git push --tags",
     "release:major": "npm version major -m \"chore: release v%s\" && git push && git push --tags",
     "release:tags": "git tag --sort=-v:refname | grep '^v'",
-    "prepublishOnly": "npm run build"
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1"
