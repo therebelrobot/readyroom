@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>heads-up</title>
+<style>
+  /* No external fonts, no external origins, no images fetched over the network.
+     Everything below is self-contained so the page renders with the network cut. */
+
+  :root {
+    --ink: #111;
+    --paper: #fff;
+    --muted: #555;
+    --line: #111;
+    --line-soft: #999;
+    --blocking: #000;
+    --low: #666;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 16px;
+    line-height: 1.45;
+  }
+
+  body { padding: 16px; max-width: 1100px; margin: 0 auto; }
+
+  h1 { font-size: 1.25rem; margin: 0 0 4px 0; letter-spacing: 0.02em; }
+  h2 { font-size: 1rem; margin: 24px 0 8px 0; text-transform: uppercase; letter-spacing: 0.08em; border-bottom: 2px solid var(--line); padding-bottom: 4px; }
+  h3 { font-size: 0.95rem; margin: 0 0 8px 0; }
+
+  .sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 12px 0; }
+
+  /* Status + error banners: text carries the meaning, not colour. */
+  .banner {
+    border: 2px solid var(--line);
+    padding: 8px 10px;
+    margin: 8px 0;
+    font-size: 0.85rem;
+  }
+  .banner[hidden] { display: none; }
+  .banner .tag { font-weight: bold; text-transform: uppercase; letter-spacing: 0.06em; }
+
+  #tokenbar { border: 2px solid var(--line); padding: 12px; margin: 12px 0; }
+  #tokenbar[hidden] { display: none; }
+  #tokenbar label { display: block; font-weight: bold; margin-bottom: 6px; }
+  #tokenbar .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #tokenbar input { flex: 1 1 240px; min-height: 44px; padding: 8px; font: inherit; border: 2px solid var(--line); background: var(--paper); color: var(--ink); }
+
+  button {
+    font: inherit;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 8px 12px;
+    border: 2px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button:focus-visible, input:focus-visible, a:focus-visible {
+    outline: 3px solid var(--ink);
+    outline-offset: 2px;
+  }
+  /* No hover-only affordances: hover is a bonus, never the only signal. */
+  button:hover { background: #eee; }
+
+  .stream-group { margin: 0 0 20px 0; }
+  .stream-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .stream-name { font-weight: bold; }
+  .stream-count { color: var(--muted); font-size: 0.85rem; }
+
+  .card {
+    border: 2px solid var(--line);
+    padding: 12px;
+    margin: 10px 0;
+    background: var(--paper);
+  }
+  /* Selection is carried by a thick left border AND a text marker, not colour alone. */
+  .card.selected { border-left-width: 10px; }
+  .card .selmark { display: none; font-weight: bold; text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; }
+  .card.selected .selmark { display: inline; }
+
+  .card-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
+  .age { color: var(--muted); font-size: 0.85rem; }
+
+  .badge {
+    display: inline-block;
+    border: 2px solid var(--line);
+    padding: 1px 6px;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: bold;
+  }
+  .badge.urgency-blocking { border-style: double; border-width: 4px; }
+  .badge.urgency-low { border-style: dotted; }
+  .badge.urgency-normal { border-style: solid; }
+  .badge.status-answered { border-style: dashed; }
+
+  .question { font-weight: bold; margin: 6px 0; }
+  .context {
+    white-space: pre-wrap;
+    border-left: 3px solid var(--line-soft);
+    padding: 6px 10px;
+    margin: 8px 0;
+    color: var(--ink);
+    font-size: 0.9rem;
+  }
+  .context[hidden] { display: none; }
+
+  .options { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .options button[aria-pressed="true"] { border-style: double; border-width: 4px; font-weight: bold; }
+
+  .answer-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .answer-row label { font-size: 0.85rem; }
+  .answer-row input[type="text"] {
+    flex: 1 1 240px;
+    min-height: 44px;
+    padding: 8px;
+    font: inherit;
+    border: 2px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+  }
+
+  .card-error { border: 2px solid var(--line); padding: 6px 8px; margin-top: 8px; font-size: 0.85rem; }
+  .card-error[hidden] { display: none; }
+  .card-error .tag { font-weight: bold; text-transform: uppercase; }
+
+  .recent .card { border-style: dashed; }
+  .empty { color: var(--muted); font-style: italic; }
+
+  .hint { color: var(--muted); font-size: 0.8rem; margin-top: 24px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
+  kbd { border: 1px solid var(--line); padding: 0 4px; font: inherit; font-size: 0.8rem; }
+
+  /* No animation on the critical path. Respect reduced motion. */
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .card.selected { transition: border-left-width 80ms linear; }
+  }
+
+  @media print {
+    body { max-width: none; }
+    button { display: none; }
+    .card { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>heads-up</h1>
+    <p class="sub">Drain the queue. <kbd>j</kbd>/<kbd>k</kbd> move &middot; <kbd>1</kbd>-<kbd>5</kbd> pick &middot; <kbd>Enter</kbd> answer &middot; <kbd>u</kbd> undo</p>
+    <div id="status" class="banner" role="status" aria-live="polite">
+      <span class="tag">Status:</span> <span id="status-text">starting</span>
+    </div>
+    <div id="error" class="banner" role="alert" hidden>
+      <span class="tag">Error:</span> <span id="error-text"></span>
+    </div>
+  </header>
+
+  <section id="tokenbar" hidden aria-labelledby="token-label">
+    <label id="token-label" for="token-input">Access token (READYROOM_TOKEN)</label>
+    <div class="row">
+      <input id="token-input" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-help">
+      <button id="token-save" type="button">Save token</button>
+    </div>
+    <p id="token-help" class="sub">Stored in this browser only. Sent as <code>Authorization: Bearer</code> on every request.</p>
+  </section>
+
+  <main id="app">
+    <section id="pending-section" aria-labelledby="pending-heading">
+      <h2 id="pending-heading">Pending</h2>
+      <div id="pending"></div>
+    </section>
+
+    <section id="recent-section" class="recent" aria-labelledby="recent-heading">
+      <h2 id="recent-heading">Recent (undoable for 5 minutes)</h2>
+      <div id="recent"></div>
+    </section>
+  </main>
+
+  <p class="hint">No markdown rendering. Context is shown as plain text with line breaks preserved.</p>
+
+  <noscript>
+    <div class="banner"><span class="tag">Error:</span> This page needs JavaScript to drain the queue.</div>
+  </noscript>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "readyroom_token";
+  var POLL_MS = 5000;
+  var UNDO_WINDOW_MS = 5 * 60 * 1000;
+
+  var state = {
+    tickets: [],
+    selectedId: null,
+    token: "",
+    abort: null,
+    pollTimer: null,
+    live: false,
+    error: "",
+    choices: {},
+    drafts: {}
+  };
+
+  var els = {
+    status: document.getElementById("status"),
+    statusText: document.getElementById("status-text"),
+    error: document.getElementById("error"),
+    errorText: document.getElementById("error-text"),
+    tokenbar: document.getElementById("tokenbar"),
+    tokenInput: document.getElementById("token-input"),
+    tokenSave: document.getElementById("token-save"),
+    pending: document.getElementById("pending"),
+    recent: document.getElementById("recent")
+  };
+
+  /* ---------------- token handling (requirement 11) ---------------- */
+
+  function readToken() {
+    try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+  }
+  function writeToken(t) {
+    try { localStorage.setItem(TOKEN_KEY, t); } catch (e) { /* storage may be blocked */ }
+  }
+  function dropToken() {
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
+  }
+  function showTokenBar(show) {
+    els.tokenbar.hidden = !show;
+    if (show) { try { els.tokenInput.focus(); } catch (e) {} }
+  }
+
+  /* ---------------- HTTP with Bearer on every request ---------------- */
+
+  function api(path, opts) {
+    opts = opts || {};
+    var headers = { "Authorization": "Bearer " + state.token };
+    if (opts.body) { headers["Content-Type"] = "application/json"; }
+    return fetch(path, {
+      method: opts.method || "GET",
+      headers: headers,
+      body: opts.body
+    }).then(function (res) {
+      if (res.status === 401) {
+        dropToken();
+        state.token = "";
+        state.error = "Token rejected (401). Enter it again.";
+        showTokenBar(true);
+        render();
+        var err = new Error("unauthorized");
+        err.unauthorized = true;
+        throw err;
+      }
+      return res;
+    });
+  }
+
+  function fetchTickets() {
+    if (!state.token) { return Promise.resolve(); }
+    return api("/api/tickets").then(function (res) {
+      if (!res.ok) { throw new Error("tickets " + res.status); }
+      return res.json();
+    }).then(function (data) {
+      state.tickets = (data && data.tickets) || [];
+      state.error = "";
+      render();
+    }).catch(function (err) {
+      if (err && err.unauthorized) { return; }
+      state.error = "Could not load tickets: " + (err && err.message ? err.message : "network error");
+      render();
+    });
+  }
+
+  /* ---------------- live updates (requirement 1) ---------------- */
+
+  function startPolling() {
+    if (state.pollTimer) { return; }
+    state.live = false;
+    fetchTickets();
+    state.pollTimer = setInterval(fetchTickets, POLL_MS);
+    render();
+  }
+  function stopPolling() {
+    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  }
+
+  /* Fetch-based SSE reader.
+     EventSource cannot attach an Authorization header, so a Bearer-protected
+     /api/events is unreachable through it. Instead we fetch the endpoint with the
+     token, read response.body through a ReadableStream reader, decode with a
+     TextDecoder, and parse text/event-stream frames: frames are separated by a blank
+     line, and the payload rides on `data:` lines. Any failure — a network error, a
+     non-200 status, or a Worker's 501 — falls back to polling /api/tickets every 5 s,
+     which is the Worker target's live-update path. */
+  function handleFrame(frame) {
+    var lines = frame.split("\n");
+    var sawData = false;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf("data:") === 0) { sawData = true; }
+    }
+    if (sawData) { fetchTickets(); }
+  }
+
+  function readSseStream(body) {
+    var reader = body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = "";
+    function pump() {
+      return reader.read().then(function (chunk) {
+        if (chunk.done) { throw new Error("sse stream closed"); }
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var idx;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          var frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          handleFrame(frame);
+        }
+        return pump();
+      });
+    }
+    return pump();
+  }
+
+  function startLive() {
+    stopLive();
+    if (!state.token) { return; }
+    if (typeof fetch === "undefined" || typeof TextDecoder === "undefined") { startPolling(); return; }
+
+    var controller = null;
+    try { controller = new AbortController(); } catch (e) { controller = null; }
+    if (controller) { state.abort = controller; }
+
+    var options = { headers: { "Authorization": "Bearer " + state.token } };
+    if (controller) { options.signal = controller.signal; }
+
+    fetch("/api/events", options).then(function (res) {
+      if (!res.ok || !res.body) {
+        /* 401, 404, a Worker's 501, or a body we cannot stream: poll instead. */
+        startPolling();
+        return;
+      }
+      state.live = true;
+      stopPolling();
+      render();
+      return readSseStream(res.body);
+    }).catch(function () {
+      if (controller && controller.signal.aborted) { return; }
+      state.live = false;
+      startPolling();
+    });
+  }
+  function stopLive() {
+    if (state.abort) {
+      try { state.abort.abort(); } catch (e) { /* ignore */ }
+      state.abort = null;
+    }
+    state.live = false;
+  }
+
+  /* ---------------- derived data ---------------- */
+
+  function pendingTickets() {
+    return state.tickets.filter(function (t) { return t.status === "pending"; });
+  }
+  function recentTickets() {
+    var now = Date.now();
+    return state.tickets.filter(function (t) {
+      if (t.status !== "answered" || !t.answered_at) { return false; }
+      return (now - new Date(t.answered_at).getTime()) <= UNDO_WINDOW_MS;
+    }).sort(function (a, b) {
+      return new Date(b.answered_at).getTime() - new Date(a.answered_at).getTime();
+    });
+  }
+
+  function groupByStream(tickets) {
+    var groups = {};
+    var order = [];
+    tickets.forEach(function (t) {
+      if (!groups[t.stream]) { groups[t.stream] = []; order.push(t.stream); }
+      groups[t.stream].push(t);
+    });
+    order.forEach(function (s) {
+      groups[s].sort(function (a, b) {
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+    });
+    order.sort(function (a, b) {
+      return new Date(groups[b][0].created_at).getTime() - new Date(groups[a][0].created_at).getTime();
+    });
+    return order.map(function (s) { return { stream: s, tickets: groups[s] }; });
+  }
+
+  function orderedPending() {
+    var out = [];
+    groupByStream(pendingTickets()).forEach(function (g) {
+      g.tickets.forEach(function (t) { out.push(t); });
+    });
+    return out;
+  }
+
+  function age(iso) {
+    var ms = Date.now() - new Date(iso).getTime();
+    if (!isFinite(ms) || ms < 0) { ms = 0; }
+    var s = Math.floor(ms / 1000);
+    if (s < 60) { return s + "s"; }
+    var m = Math.floor(s / 60);
+    if (m < 60) { return m + "m"; }
+    var h = Math.floor(m / 60);
+    if (h < 24) { return h + "h"; }
+    return Math.floor(h / 24) + "d";
+  }
+
+  /* ---------------- actions ---------------- */
+
+  function setCardError(id, msg) {
+    var el = document.getElementById("err-" + id);
+    if (el) {
+      el.hidden = false;
+      var span = el.querySelector(".err-text");
+      if (span) { span.textContent = msg; }
+    }
+  }
+
+  function submitAnswer(ticket) {
+    var input = document.getElementById("free-" + ticket.id);
+    var text = input ? input.value.trim() : (state.drafts[ticket.id] || "").trim();
+    var choice = state.choices[ticket.id] || "";
+    var answer = text || choice;
+    if (!answer) {
+      setCardError(ticket.id, "Type an answer or pick an option first.");
+      return;
+    }
+    api("/api/answer", {
+      method: "POST",
+      body: JSON.stringify({ id: ticket.id, answer: answer, answered_by: "human" })
+    }).then(function (res) {
+      if (res.status === 404) { setCardError(ticket.id, "Ticket not found (404)."); return; }
+      if (res.status === 409) { setCardError(ticket.id, "Already answered (409)."); return; }
+      if (!res.ok) { setCardError(ticket.id, "Answer failed (" + res.status + ")."); return; }
+      delete state.choices[ticket.id];
+      delete state.drafts[ticket.id];
+      return fetchTickets();
+    }).catch(function (err) {
+      if (err && err.unauthorized) { return; }
+      setCardError(ticket.id, "Answer failed: " + (err && err.message ? err.message : "network error"));
+    });
+  }
+
+  function undo(ticketId) {
+    api("/api/undo", { method: "POST", body: JSON.stringify({ id: ticketId }) })
+      .then(function (res) {
+        if (res.status === 409) { state.error = "Undo window has passed (409)."; render(); return; }
+        if (!res.ok) { state.error = "Undo failed (" + res.status + ")."; render(); return; }
+        return fetchTickets();
+      })
+      .catch(function (err) {
+        if (err && err.unauthorized) { return; }
+        state.error = "Undo failed: " + (err && err.message ? err.message : "network error");
+        render();
+      });
+  }
+
+  function undoLast() {
+    var recent = recentTickets();
+    if (recent.length === 0) { return; }
+    undo(recent[0].id);
+  }
+
+  /* ---------------- keyboard (requirement 4) ---------------- */
+
+  function isTypingTarget(el) {
+    if (!el) { return false; }
+    var tag = el.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable === true;
+  }
+
+  function moveSelection(delta) {
+    var list = orderedPending();
+    if (list.length === 0) { return; }
+    var idx = -1;
+    for (var i = 0; i < list.length; i++) { if (list[i].id === state.selectedId) { idx = i; break; } }
+    if (idx === -1) { idx = delta > 0 ? -1 : 0; }
+    var next = idx + delta;
+    if (next < 0) { next = 0; }
+    if (next > list.length - 1) { next = list.length - 1; }
+    state.selectedId = list[next].id;
+    render();
+    var card = document.getElementById("card-" + state.selectedId);
+    if (card && card.scrollIntoView) { card.scrollIntoView({ block: "nearest" }); }
+  }
+
+  function pickOption(n) {
+    var list = orderedPending();
+    var ticket = null;
+    for (var i = 0; i < list.length; i++) { if (list[i].id === state.selectedId) { ticket = list[i]; break; } }
+    if (!ticket || !ticket.options || !ticket.options[n - 1]) { return; }
+    state.choices[ticket.id] = ticket.options[n - 1];
+    render();
+  }
+
+  function submitSelected() {
+    var list = orderedPending();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === state.selectedId) { submitAnswer(list[i]); return; }
+    }
+  }
+
+  document.addEventListener("keydown", function (e) {
+    if (isTypingTarget(e.target)) { return; }
+    if (e.metaKey || e.ctrlKey || e.altKey) { return; }
+    if (e.key === "j") { e.preventDefault(); moveSelection(1); }
+    else if (e.key === "k") { e.preventDefault(); moveSelection(-1); }
+    else if (e.key >= "1" && e.key <= "5") { e.preventDefault(); pickOption(parseInt(e.key, 10)); }
+    else if (e.key === "Enter") { e.preventDefault(); submitSelected(); }
+    else if (e.key === "u") { e.preventDefault(); undoLast(); }
+  });
+
+  /* ---------------- rendering ---------------- */
+
+  function captureDrafts() {
+    var inputs = document.querySelectorAll("[data-draft]");
+    for (var i = 0; i < inputs.length; i++) {
+      state.drafts[inputs[i].getAttribute("data-draft")] = inputs[i].value;
+    }
+  }
+
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) { node.className = cls; }
+    if (text !== undefined && text !== null) { node.textContent = text; }
+    return node;
+  }
+
+  function urgencyBadge(urgency) {
+    var b = el("span", "badge urgency-" + urgency, "urgency: " + urgency);
+    return b;
+  }
+
+  function buildCard(ticket, isRecent) {
+    var card = el("article", "card" + (ticket.id === state.selectedId ? " selected" : ""));
+    card.id = "card-" + ticket.id;
+    card.setAttribute("aria-label", "Ticket from " + ticket.stream + ": " + ticket.question);
+
+    var head = el("div", "card-head");
+    head.appendChild(el("span", "selmark", "selected"));
+    head.appendChild(el("span", "stream-name", ticket.stream));
+    head.appendChild(el("span", "age", age(ticket.created_at) + " old"));
+    head.appendChild(urgencyBadge(ticket.urgency));
+    if (isRecent) {
+      head.appendChild(el("span", "badge status-answered", "status: answered"));
+      if (ticket.answered_by) { head.appendChild(el("span", "age", "by " + ticket.answered_by)); }
+    }
+    card.appendChild(head);
+
+    card.appendChild(el("p", "question", ticket.question));
+
+    if (ticket.context) {
+      var ctx = el("div", "context", ticket.context);
+      card.appendChild(ctx);
+    }
+
+    if (isRecent) {
+      var ans = el("p", "question", "Answer: " + (ticket.answer || "(none)"));
+      card.appendChild(ans);
+      var undoBtn = el("button", null, "Undo");
+      undoBtn.type = "button";
+      undoBtn.setAttribute("aria-label", "Undo answer for ticket from " + ticket.stream);
+      undoBtn.addEventListener("click", function () { undo(ticket.id); });
+      var row = el("div", "answer-row");
+      row.appendChild(undoBtn);
+      card.appendChild(row);
+      return card;
+    }
+
+    if (ticket.options && ticket.options.length) {
+      var opts = el("div", "options");
+      opts.setAttribute("role", "group");
+      opts.setAttribute("aria-label", "Options for ticket from " + ticket.stream);
+      ticket.options.forEach(function (opt, i) {
+        var b = el("button", null, (i + 1) + ". " + opt);
+        b.type = "button";
+        b.setAttribute("aria-pressed", state.choices[ticket.id] === opt ? "true" : "false");
+        b.addEventListener("click", function () {
+          state.choices[ticket.id] = opt;
+          state.selectedId = ticket.id;
+          render();
+        });
+        opts.appendChild(b);
+      });
+      card.appendChild(opts);
+    }
+
+    var form = el("form", "answer-row");
+    form.setAttribute("novalidate", "novalidate");
+    var label = el("label", null, "Answer");
+    label.setAttribute("for", "free-" + ticket.id);
+    form.appendChild(label);
+    var input = document.createElement("input");
+    input.type = "text";
+    input.id = "free-" + ticket.id;
+    input.setAttribute("data-draft", ticket.id);
+    input.setAttribute("autocomplete", "off");
+    input.value = state.drafts[ticket.id] || "";
+    input.addEventListener("input", function () { state.drafts[ticket.id] = input.value; });
+    input.addEventListener("focus", function () { state.selectedId = ticket.id; });
+    form.appendChild(input);
+    var submit = el("button", null, "Answer");
+    submit.type = "submit";
+    form.appendChild(submit);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      submitAnswer(ticket);
+    });
+    card.appendChild(form);
+
+    var err = el("div", "card-error");
+    err.id = "err-" + ticket.id;
+    err.hidden = true;
+    err.setAttribute("role", "alert");
+    err.appendChild(el("span", "tag", "Error: "));
+    err.appendChild(el("span", "err-text", ""));
+    card.appendChild(err);
+
+    return card;
+  }
+
+  function render() {
+    captureDrafts();
+
+    var activeId = document.activeElement && document.activeElement.id ? document.activeElement.id : null;
+    var selStart = null, selEnd = null;
+    if (activeId && document.activeElement.setSelectionRange) {
+      try {
+        selStart = document.activeElement.selectionStart;
+        selEnd = document.activeElement.selectionEnd;
+      } catch (e) { /* not a text input */ }
+    }
+
+    var pending = pendingTickets();
+    var recent = recentTickets();
+
+    /* requirement 5: tab title carries the count */
+    document.title = pending.length > 0 ? "(" + pending.length + ") heads-up" : "heads-up";
+
+    /* status line */
+    var statusText = "idle";
+    if (state.live) { statusText = "live (server-sent events)"; }
+    else if (state.pollTimer) { statusText = "polling every 5s"; }
+    else if (!state.token) { statusText = "waiting for token"; }
+    els.statusText.textContent = statusText;
+
+    if (state.error) {
+      els.error.hidden = false;
+      els.errorText.textContent = state.error;
+    } else {
+      els.error.hidden = true;
+      els.errorText.textContent = "";
+    }
+
+    /* pending, grouped by stream, newest stream first */
+    els.pending.textContent = "";
+    if (pending.length === 0) {
+      els.pending.appendChild(el("p", "empty", "No pending tickets."));
+    } else {
+      groupByStream(pending).forEach(function (group) {
+        var section = el("section", "stream-group");
+        section.setAttribute("aria-label", "Stream " + group.stream);
+        var head = el("div", "stream-head");
+        head.appendChild(el("h3", "stream-name", group.stream));
+        head.appendChild(el("span", "stream-count", group.tickets.length + " pending"));
+        section.appendChild(head);
+        group.tickets.forEach(function (t) { section.appendChild(buildCard(t, false)); });
+        els.pending.appendChild(section);
+      });
+    }
+
+    /* recent, undoable for 5 minutes */
+    els.recent.textContent = "";
+    if (recent.length === 0) {
+      els.recent.appendChild(el("p", "empty", "Nothing answered in the last 5 minutes."));
+    } else {
+      recent.forEach(function (t) { els.recent.appendChild(buildCard(t, true)); });
+    }
+
+    /* restore focus + caret so polling re-renders do not interrupt typing */
+    if (activeId) {
+      var again = document.getElementById(activeId);
+      if (again && again.focus) {
+        try {
+          again.focus();
+          if (selStart !== null && again.setSelectionRange) { again.setSelectionRange(selStart, selEnd); }
+        } catch (e) { /* ignore */ }
+      }
+    }
+  }
+
+  /* ---------------- wiring ---------------- */
+
+  els.tokenSave.addEventListener("click", function () {
+    var t = els.tokenInput.value.trim();
+    if (!t) { return; }
+    state.token = t;
+    writeToken(t);
+    state.error = "";
+    showTokenBar(false);
+    startLive();
+    fetchTickets();
+  });
+  els.tokenInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); els.tokenSave.click(); }
+  });
+
+  /* requirement 9: re-render on window load */
+  window.addEventListener("load", render);
+
+  /* boot */
+  state.token = readToken();
+  if (state.token) {
+    showTokenBar(false);
+    startLive();
+    fetchTickets();
+  } else {
+    showTokenBar(true);
+  }
+
+  /* requirement 9: first paint is synchronous, at the end of the script, not in rAF */
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+# Cloudflare Worker configuration for readyroom.
+#
+# The Worker serves the heads-up page and the Streamable HTTP MCP endpoint from the
+# same origin, backed by one SQLite Durable Object instance.
+#
+# Secrets are NOT committed. Supply the token out of band:
+#   wrangler secret put READYROOM_TOKEN
+#
+# Non-secret config lives under [vars] below.
+
+name = "readyroom"
+main = "src/worker.ts"
+
+# Pinned deliberately. `new_sqlite_classes` (below) requires a compatibility date at or
+# after 2024-04-03; this is pinned well past that and should be bumped consciously.
+compatibility_date = "2025-01-01"
+
+# Inline `public/index.html` as a string, the Worker equivalent of the Node build's
+# `--loader:.html=text`. This is what makes `import page from "../public/index.html"`
+# resolve to the page text at bundle time, with no runtime file resolution.
+#
+# `fallthrough = false` states that this rule is terminal, which silences wrangler's
+# warning that the built-in default rules (`**/*.txt`, `**/*.html`, `**/*.sql`) are
+# shadowed. The default already treats `.html` as Text, so behavior is unchanged.
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = false
+
+[vars]
+# READYROOM_TOKEN is a SECRET, not a var. Set it with `wrangler secret put READYROOM_TOKEN`
+# and never commit it. The Worker has no loopback and no safe fallback, so the token is
+# mandatory: every /api/* route rejects a request without it.
+#
+# READYROOM_ALLOWED_ORIGINS is optional. It is a comma-separated list of extra origins
+# allowed on the /mcp Origin guard, appended to the Worker's own origin. Leave it unset
+# unless a non-browser MCP client needs to send a different Origin.
+# READYROOM_ALLOWED_ORIGINS = "https://readyroom.example.com"
+
+# The single Durable Object instance that owns the queue. The Worker addresses it with
+# idFromName("queue"), so every request lands on the same writer.
+[[durable_objects.bindings]]
+name = "QUEUE"
+class_name = "QueueDurableObject"
+
+# SQLite-backed Durable Objects. `new_sqlite_classes` is required for `ctx.storage.sql`;
+# `new_classes` would leave the SQL API unavailable.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["QueueDurableObject"]

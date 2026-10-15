@@ -1,0 +1,35 @@
+name: Deploy Worker (optional)
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: wrangler deploy
+    # OFF by default. A Worker deploy needs the operator's own Cloudflare account,
+    # so this only runs when the repository variable ENABLE_WORKER_DEPLOY is 'true'
+    # and the CLOUDFLARE_API_TOKEN secret is set. Otherwise it is a documented
+    # manual step (npm run deploy:worker) for the operator.
+    if: vars.ENABLE_WORKER_DEPLOY == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy Worker
+        run: npm run deploy:worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
