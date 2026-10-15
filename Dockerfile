@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # Build stage — install devDependencies, bundle to a single self-contained file.
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS build
+FROM node:25-alpine AS build
 WORKDIR /app
 
 # Copy manifests first so the dependency layer caches across source-only changes.
@@ -21,7 +21,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Runtime stage — dist/ only. No devDependencies, no node_modules.
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS runtime
+FROM node:25-alpine AS runtime
 WORKDIR /app
 
 # The container binds 0.0.0.0 internally; the loopback guarantee comes from the
