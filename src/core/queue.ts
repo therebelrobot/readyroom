@@ -266,7 +266,7 @@ export async function cancel(store: TicketStore, id: string, now: string): Promi
 }
 
 /**
- * Tickets for the heads-up page (`GET /api/tickets`): all pending tickets, plus
+ * Tickets for the readyroom page (`GET /api/tickets`): all pending tickets, plus
  * answered tickets answered within `RECENT_WINDOW_MS` (the undo-eligible "recent"
  * section). Pending first, oldest first; recent answered after, newest first.
  */

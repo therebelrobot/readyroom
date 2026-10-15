@@ -57,7 +57,7 @@ These words are used exactly, in code, comments, tool descriptions, and docs. No
 - **ticket** — one pending request: `{ id, stream, question, options, context, urgency, status, created_at, expires_at }`.
 - **stream** — which agent asked. Defaults to `$READYROOM_STREAM`, else `basename(cwd)`.
 - **drain** — the human answering tickets from the page.
-- **heads-up page** — the single HTML page served at `GET /`.
+- **readyroom page** — the single HTML page served at `GET /`.
 
 The tool names (`ask_human`, `wait_for_answer`, `list_pending`, `cancel_ticket`) are the
 agent-facing contract and do not change with the product name. The product name is a separate
@@ -222,7 +222,7 @@ handles `SIGTERM`.
 
 ### Cloudflare Worker
 
-Always-on, reachable from anywhere, no box to patch. The Worker serves the heads-up page and
+Always-on, reachable from anywhere, no box to patch. The Worker serves the readyroom page and
 the Streamable HTTP MCP endpoint from the same origin, backed by one SQLite Durable Object
 instance.
 
@@ -526,7 +526,7 @@ The Worker has no state dir, no bind address, and no daemon role. Three conseque
 1. **The token is mandatory.** There is no loopback and no safe fallback, so a token-less
    request to any `/api/*` route is rejected. (On the Node target, a missing token is an allow —
    the bind refusal rule guarantees a token-less server is only reachable on loopback.)
-2. **`/api/events` returns `501`** with a short plain-text body. The heads-up page's polling
+2. **`/api/events` returns `501`** with a short plain-text body. The readyroom page's polling
    fallback carries the Worker target; no Durable-Object-held stream fleet is built for v1.
 3. **`wait_for_answer` clamps its timeout** to a short window (5 seconds) and returns
    `status: "pending"` promptly rather than erroring. This is the **one place the three targets
@@ -534,7 +534,7 @@ The Worker has no state dir, no bind address, and no daemon role. Three conseque
    protocol — call again later — is already the correct handling, so no agent needs to know
    which target it is talking to.
 
-## The heads-up page
+## The readyroom page
 
 The page is a **status board**, not a chat log. It shows what is waiting and clears when you
 have answered — which is why there is no markdown parser and no message history.
@@ -552,7 +552,7 @@ network otherwise cut. It is inlined at build time into each target's bundle.
   option buttons, a free-text field, and an Answer button.
 - **Keyboard-first.** `j`/`k` move between tickets, `1`-`5` pick an option, `Enter` submits, `u`
   undoes the last answer. Draining a queue with a mouse is the slow path.
-- **Tab title carries the count.** `(3) heads-up`.
+- **Tab title carries the count.** `(3) readyroom`.
 - **No colour-only signalling.** Urgency and status are carried by text and borders as well as
   hue, so the page is legible on an e-ink display and in grayscale print.
 - **No animation on the critical path.** Respects `prefers-reduced-motion`. No hover-only
@@ -570,7 +570,7 @@ network otherwise cut. It is inlined at build time into each target's bundle.
 
 ```
 GET  /healthz          -> 200, body "ok"
-GET  /                 -> the heads-up page (index.html)
+GET  /                 -> the readyroom page (index.html)
 GET  /api/tickets      -> { tickets: Ticket[] }   pending + last 5 min of answered
 GET  /api/events       -> text/event-stream of ticket changes   (501 on the Worker)
 POST /api/answer       -> { id, answer, answered_by? } -> 200 | 404 | 409 already answered

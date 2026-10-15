@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>heads-up</title>
+<title>readyroom</title>
 <style>
   /* No external fonts, no external origins, no images fetched over the network.
      Everything below is self-contained so the page renders with the network cut. */
@@ -157,7 +157,7 @@
 </head>
 <body>
   <header>
-    <h1>heads-up</h1>
+    <h1>readyroom</h1>
     <p class="sub">Drain the queue. <kbd>j</kbd>/<kbd>k</kbd> move &middot; <kbd>1</kbd>-<kbd>5</kbd> pick &middot; <kbd>Enter</kbd> answer &middot; <kbd>u</kbd> undo</p>
     <div id="status" class="banner" role="status" aria-live="polite">
       <span class="tag">Status:</span> <span id="status-text">starting</span>
@@ -652,7 +652,7 @@
     var recent = recentTickets();
 
     /* requirement 5: tab title carries the count */
-    document.title = pending.length > 0 ? "(" + pending.length + ") heads-up" : "heads-up";
+    document.title = pending.length > 0 ? "(" + pending.length + ") readyroom" : "readyroom";
 
     /* status line */
     var statusText = "idle";

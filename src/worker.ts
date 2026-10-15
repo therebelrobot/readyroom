@@ -4,7 +4,7 @@
  *
  * Route table (web-standard `Request`/`Response`):
  *   GET  /healthz          -> 200, body exactly "ok"
- *   GET  /                 -> 200 text/html, the inlined heads-up page
+ *   GET  /                 -> 200 text/html, the inlined readyroom page
  *   GET  /api/tickets      -> 200 { tickets }                 (Bearer)
  *   GET  /api/events       -> 501 plain text                  (Bearer)
  *   POST /api/answer       -> 200 | 404 | 409                 (Bearer)
@@ -16,7 +16,7 @@
  *   1. The token is mandatory. There is no loopback and no safe fallback, so a
  *      token-less request to any `/api/*` route is rejected. `requireBearer` here
  *      returns false when no token is configured, unlike the Node target.
- *   2. `/api/events` returns 501. The heads-up page's polling fallback carries the
+ *   2. `/api/events` returns 501. The readyroom page's polling fallback carries the
  *      Worker target; no Durable-Object-held stream fleet is built for v1.
  *   3. `wait_for_answer` clamps its wait to `WORKER_WAIT_CLAMP_SECONDS` and returns
  *      `status: "pending"` promptly rather than hanging. This is the one place the
@@ -424,7 +424,7 @@ export async function handleRequest(request: Request, env: WorkerEnv, deps: Work
       }
       // No SSE fleet on the Worker; the page's polling fallback carries this target.
       return text(
-        "Server-Sent Events are not available on the Worker target. The heads-up page polls GET /api/tickets every 5 seconds instead.",
+        "Server-Sent Events are not available on the Worker target. The readyroom page polls GET /api/tickets every 5 seconds instead.",
         501,
       );
     }

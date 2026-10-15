@@ -5,7 +5,7 @@
  *
  * Route table:
  *   GET  /healthz             -> 200, body "ok"
- *   GET  /                    -> 200 text/html, the heads-up page
+ *   GET  /                    -> 200 text/html, the readyroom page
  *   GET  /api/tickets         -> 200 { tickets }           (Bearer)
  *   GET  /api/events          -> text/event-stream          (Bearer)
  *   POST /api/answer          -> 200 | 404 | 409            (Bearer)

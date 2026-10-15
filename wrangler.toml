@@ -1,6 +1,6 @@
 # Cloudflare Worker configuration for readyroom.
 #
-# The Worker serves the heads-up page and the Streamable HTTP MCP endpoint from the
+# The Worker serves the readyroom page and the Streamable HTTP MCP endpoint from the
 # same origin, backed by one SQLite Durable Object instance.
 #
 # Secrets are NOT committed. Supply the token out of band:

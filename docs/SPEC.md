@@ -19,7 +19,7 @@ Use these exact words in code, comments, tool descriptions, and docs. Do not inv
 - **ticket** — one pending request: `{ id, stream, question, options, context, urgency, status, created_at, expires_at }`
 - **stream** — which agent asked. Defaults to `$READYROOM_STREAM`, else `basename(cwd)`.
 - **drain** — the human answering tickets from the page.
-- **heads-up page** — the single HTML page served at `GET /`.
+- **readyroom page** — the single HTML page served at `GET /`.
 
 The tool names (`ask_human`, `wait_for_answer`, `list_pending`, `cancel_ticket`) are the agent-facing contract and do not change with the product name. The product name is a separate layer, the way `ripgrep` ships `rg`.
 
@@ -82,7 +82,7 @@ The TypeScript SDK's HTTP serving docs describe a web-standard shape on Workers/
 
 ```
 GET  /healthz          -> 200, body "ok"
-GET  /                 -> the heads-up page (index.html)
+GET  /                 -> the readyroom page (index.html)
 GET  /api/tickets      -> { tickets: Ticket[] }   pending + last 5 min of answered
 GET  /api/events       -> text/event-stream of ticket changes
 POST /api/answer       -> { id, answer, answered_by? } -> 200 | 404 | 409 already answered
@@ -91,7 +91,7 @@ POST /api/undo         -> { id } -> 200 | 409 outside the undo window
 
 Per-target notes on the same route table:
 
-- `GET /api/events` — real SSE on npx and Docker. On the **Worker target, return `501` with a short plain-text body.** The heads-up page already mandates a polling fallback, so the fallback is what carries the Worker target. Do not add WebSockets and do not build a Durable-Object-held stream fleet for v1; a Workers response can stay open as a stream, but the fan-out complexity is not worth it when the page already handles the fallback.
+- `GET /api/events` — real SSE on npx and Docker. On the **Worker target, return `501` with a short plain-text body.** The readyroom page already mandates a polling fallback, so the fallback is what carries the Worker target. Do not add WebSockets and do not build a Durable-Object-held stream fleet for v1; a Workers response can stay open as a stream, but the fan-out complexity is not worth it when the page already handles the fallback.
 - `GET /healthz` — return `"ok"` verbatim on all targets. The npx singleton probe (below) needs more than that, so it reads `daemon.json` from the state dir rather than parsing this response.
 
 ## Security
@@ -160,7 +160,7 @@ If `daemon.json` is stale (pid dead, or the port refuses), the starting process 
 
 Reason: this is what makes `npx readyroom` work for a developer who has three agents running, which is the majority of the audience for that target.
 
-## The heads-up page
+## The readyroom page
 
 `public/index.html`. One file, shared by all three targets. All CSS and JS inline. No CDN, no external origin, no build step. It must render correctly when opened from the server with the network otherwise cut.
 
@@ -172,7 +172,7 @@ Required:
 2. **Grouped by stream.** Tickets grouped under a stream heading, newest stream first. This is the whole point: you need to know which agent is asking.
 3. **Card contents.** Stream name, ticket age (`4m`), urgency badge, the question, the context, option buttons, a free-text field, and an Answer button.
 4. **Keyboard-first.** `j`/`k` move between tickets, `1`-`5` pick an option, `Enter` submits, `u` undoes the last answer. Reason: draining a queue with a mouse is the slow path, and the queue exists to be drained quickly.
-5. **Tab title carries the count.** `(3) heads-up`.
+5. **Tab title carries the count.** `(3) readyroom`.
 6. **No colour-only signalling.** Urgency and status are carried by text and borders as well as hue. Reason: this page has to be legible on an e-ink display and in grayscale print.
 7. **No animation on the critical path.** Respect `prefers-reduced-motion`. No hover-only affordances — every action reachable by keyboard and by tap.
 8. **Undo.** Answered tickets stay in a "recent" section for 5 minutes with an Undo button that calls `/api/undo`.

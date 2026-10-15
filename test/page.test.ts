@@ -55,8 +55,8 @@ test("page: context renders with line breaks preserved", () => {
 });
 
 test("page: tab title carries the pending count", () => {
-  assert.ok(html.includes(") heads-up"), "must render the (N) heads-up form");
-  assert.ok(html.includes("\"heads-up\""), "must render the bare heads-up form at zero");
+  assert.ok(html.includes(") readyroom"), "must render the (N) readyroom form");
+  assert.ok(html.includes("\"readyroom\""), "must render the bare readyroom form at zero");
 });
 
 test("page: token is stored in localStorage and sent as a Bearer header", () => {
