@@ -1,0 +1,110 @@
+name: Release
+
+# Merging a PR to main runs semantic-release. It reads the conventional-commit
+# messages since the last release and picks the next version:
+#
+#   fix: ...                       -> patch
+#   feat: ...                      -> minor
+#   <anything> + BREAKING CHANGE:  -> minor while 0.x, major from 1.0 onward
+#   docs:/chore:/refactor:/test:   -> no release
+#
+# The pre-1.0 downgrade of breaking changes lives in release.config.js and
+# switches itself off once the current version's major is no longer 0.
+#
+# It then writes CHANGELOG.md and the new version into package.json, commits
+# them, tags vX.Y.Z, and opens the GitHub Release.
+#
+# Why the explicit fan-out below, instead of letting the tag trigger the publish
+# workflows: the tag is pushed with the built-in GITHUB_TOKEN, and GitHub does
+# not start workflows for events caused by GITHUB_TOKEN (recursive-run
+# prevention), so a pushed tag alone would publish nothing. workflow_dispatch is
+# the one event that rule exempts, so this workflow dispatches the publishers on
+# the new tag itself. That keeps the whole pipeline on the built-in token — no
+# PAT, no repo secret.
+#
+# Note this job deliberately does NOT request `id-token: write`. npm publishing
+# (the only step that needs the OIDC token) stays in npm-publish.yml, so no
+# dependency code ever runs beside that token. This job installs and runs
+# semantic-release, so it must never hold it.
+
+on:
+  push:
+    branches: [main]
+
+# One release at a time; never cancel one part-way.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the release commit + tag, create the GitHub Release
+  issues: write # comment on released issues
+  pull-requests: write # comment on released pull requests
+  actions: write # dispatch the publish/deploy workflows
+
+jobs:
+  release:
+    name: semantic-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # semantic-release walks the whole tag history to find the last release.
+          fetch-depth: 0
+          # @semantic-release/git needs to push the release commit back to main.
+          persist-credentials: true
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fail before tagging, so a broken build never becomes a version. The
+      # publisher repeats these, but by then the tag would already exist.
+      - name: Verify the build
+        run: |
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Remember the current version
+        id: before
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx --no-install semantic-release
+
+      - name: Did we cut a release?
+        id: released
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$version" != "${{ steps.before.outputs.version }}" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "::notice::released v$version"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no releasable commits since the last release; nothing to publish"
+          fi
+
+      # The tag push above cannot start other workflows (GITHUB_TOKEN); this can.
+      - name: Publish the new tag
+        if: steps.released.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.released.outputs.version }}
+          WORKER_DEPLOY: ${{ vars.ENABLE_WORKER_DEPLOY }}
+        run: |
+          gh workflow run npm-publish.yml --ref "refs/tags/$TAG"
+          gh workflow run publish.yml --ref "refs/tags/$TAG"
+          if [ "$WORKER_DEPLOY" = "true" ]; then
+            gh workflow run deploy-worker.yml --ref "refs/tags/$TAG"
+          fi
