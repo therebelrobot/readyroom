@@ -45,3 +45,39 @@ export const POLL_INTERVAL_MS = 250;
 
 /** Default state directory (Node targets). */
 export const DEFAULT_STATE_DIR = "./.state";
+
+/** Subdirectory of the state dir holding media blobs (`FileTicketStore`). */
+export const MEDIA_DIR = "media";
+
+/** Maximum number of media attachments on one ticket. */
+export const MAX_MEDIA_FILES = 8;
+
+/** Maximum decoded size of one media attachment, in bytes (8 MiB). */
+export const MAX_MEDIA_BYTES_PER_FILE = 8 * 1024 * 1024;
+
+/** Maximum decoded size of all media on one ticket, in bytes (24 MiB). */
+export const MAX_MEDIA_BYTES_PER_TICKET = 24 * 1024 * 1024;
+
+/** Maximum decoded size of one rendered annotation image, in bytes (8 MiB). */
+export const MAX_ANNOTATION_BYTES = 8 * 1024 * 1024;
+
+/** Maximum number of annotations on one answer. */
+export const MAX_ANNOTATIONS = 32;
+
+/**
+ * Media bytes per Durable Object SQLite row.
+ *
+ * Cloudflare caps a SQLite string/BLOB/row at 2 MB, so a large attachment is stored as
+ * a series of chunks. 524_286 is a multiple of 3, which means the base64 of every
+ * non-final chunk is padding-free and the chunk encodings concatenate into the base64
+ * of the whole blob without a decode/re-encode on read.
+ */
+export const MEDIA_CHUNK_BYTES = 524_286;
+
+/**
+ * Maximum request body buffered by the Node HTTP layer, in bytes (48 MiB).
+ *
+ * Base64 inflates by ~33%, and `ask_human` may carry a ticket's full media budget
+ * (`MAX_MEDIA_BYTES_PER_TICKET`) through `/internal/tool-call` or `/mcp` in one body.
+ */
+export const MAX_BODY_BYTES = 48 * 1024 * 1024;

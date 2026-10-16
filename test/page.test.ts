@@ -74,3 +74,29 @@ test("page: first paint is synchronous, not inside requestAnimationFrame", () =>
   assert.equal(html.includes("requestAnimationFrame"), false, "must not defer first paint to rAF");
   assert.ok(html.includes("window.addEventListener(\"load\""), "must re-render on window load");
 });
+
+test("page: media is fetched with the Bearer token and shown via object URLs", () => {
+  assert.ok(html.includes("/api/media/"), "must fetch a blob from /api/media/{id}");
+  assert.ok(html.includes("createObjectURL"), "must render fetched bytes from an object URL (<img src> cannot send a Bearer header)");
+  assert.ok(html.includes("Authorization"), "must attach the Bearer header to the media fetch");
+});
+
+test("page: attachments are expandable for inspection", () => {
+  assert.ok(html.includes("media-toggle"), "must have an expand/collapse control");
+  assert.ok(html.includes("aria-expanded"), "the toggle must expose aria-expanded");
+  assert.ok(html.includes("for inspection"), "the toggle must name what it does");
+});
+
+test("page: images are drawn on (annotated) on a canvas", () => {
+  assert.ok(html.includes("data-media-stage"), "must mark the media stage for keyboard handling");
+  assert.ok(html.includes("createElement(\"canvas\")"), "images must be annotatable on a canvas");
+  assert.ok(html.includes("pointerdown"), "the canvas must accept pointer drawing");
+  assert.ok(html.includes("toBlob"), "markup must be rendered to an image blob");
+});
+
+test("page: annotations and the rendered markup are sent with the answer", () => {
+  assert.ok(html.includes("annotations"), "the answer body must carry annotations");
+  assert.ok(html.includes("annotated_media_id"), "a rendered copy must be referenced by id");
+  assert.ok(html.includes("\"/api/media\""), "the rendered copy must be uploaded to POST /api/media");
+  assert.ok(html.includes("or add an annotation first"), "the empty-submit guard must allow an annotation-only answer");
+});

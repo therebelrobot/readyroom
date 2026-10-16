@@ -9,8 +9,19 @@
  * under test and so the store never needs its own clock.
  */
 
-import type { AskHumanInput, AuditEntry, Status, Ticket, TicketStore } from "./types";
+import type {
+  Annotation,
+  AnnotationInput,
+  AskHumanInput,
+  AuditEntry,
+  MediaInput,
+  MediaRef,
+  Status,
+  Ticket,
+  TicketStore,
+} from "./types";
 import { DEFAULT_TIMEOUT_SECONDS, RECENT_WINDOW_MS, UNDO_WINDOW_MS } from "./constants";
+import { base64ByteLength, buildMediaRef, mediaKind } from "./media";
 import { resolveStream } from "./stream";
 
 /**
@@ -66,6 +77,18 @@ function makeAudit(
   return entry;
 }
 
+/**
+ * Store one validated media upload and return its metadata ref.
+ *
+ * Used both by `enqueue` (agent-supplied attachments) and by the HTTP layer's
+ * `POST /api/media` (a rendered annotation copy), so the two paths cannot diverge.
+ */
+export async function uploadMedia(store: TicketStore, input: MediaInput, now: string): Promise<MediaRef> {
+  const id = newId();
+  await store.putMedia({ id, mime_type: input.mime_type, data_base64: input.data_base64 });
+  return buildMediaRef(id, input, now);
+}
+
 /** Create a pending ticket, persist it, and append a `created` audit entry. */
 export async function enqueue(
   store: TicketStore,
@@ -96,8 +119,22 @@ export async function enqueue(
     ticket.default_answer = input.default_answer;
   }
 
+  // Media bytes are stored BEFORE the ticket, so a persisted ticket never references a
+  // blob that does not exist yet. Validation guarantees every entry has a known kind.
+  const media: MediaRef[] = [];
+  if (input.media !== undefined && input.media.length > 0) {
+    for (const item of input.media) {
+      media.push(await uploadMedia(store, item, created_at));
+    }
+    ticket.media = media;
+  }
+
   await store.put(ticket);
-  await store.appendAudit(makeAudit(ticket.id, "created", created_at, stream));
+  const createdAudit = makeAudit(ticket.id, "created", created_at, stream);
+  if (media.length > 0) {
+    createdAudit.media_count = media.length;
+  }
+  await store.appendAudit(createdAudit);
   return ticket;
 }
 
@@ -180,6 +217,13 @@ export async function listResolved(
  *
  * Expiry is resolved first, so answering a ticket that has quietly expired returns
  * 409 rather than resurrecting a stale pending row.
+ *
+ * `annotations` are optional and accompany the answer. An answer may be text, a chosen
+ * option, one or more annotations, or any combination — but never nothing: an empty
+ * answer with no annotations is a 400 rather than a ticket that says "answered" with no
+ * content. A rendered markup copy referenced by `annotated_media_id` must already exist
+ * in the media store (the page uploads it with `POST /api/media` first); a missing or
+ * non-image blob is a 400.
  */
 export async function answer(
   store: TicketStore,
@@ -187,6 +231,7 @@ export async function answer(
   value: string,
   answeredBy: "human" | "default",
   now: string,
+  annotations: AnnotationInput[] = [],
 ): Promise<Ticket> {
   const existing = await getResolved(store, id, now);
   if (existing === undefined) {
@@ -196,16 +241,65 @@ export async function answer(
     throw conflict(`ticket ${id} is ${existing.status}; only a pending ticket can be answered`);
   }
 
+  const resolved: Annotation[] = [];
+  for (const input of annotations) {
+    const annotation: Annotation = { id: newId() };
+    if (input.text !== undefined) {
+      annotation.text = input.text;
+    }
+    if (input.media_id !== undefined) {
+      annotation.media_id = input.media_id;
+    }
+    if (input.at_seconds !== undefined) {
+      annotation.at_seconds = input.at_seconds;
+    }
+    if (input.annotated_media_id !== undefined) {
+      const blob = await store.getMedia(input.annotated_media_id);
+      if (blob === undefined) {
+        throw new QueueError(
+          400,
+          `annotation media ${input.annotated_media_id} not found; upload it with POST /api/media first`,
+        );
+      }
+      const kind = mediaKind(blob.mime_type);
+      if (kind !== "image") {
+        throw new QueueError(400, `annotation media ${input.annotated_media_id} must be an image`);
+      }
+      annotation.annotated_media = {
+        id: blob.id,
+        kind,
+        mime_type: blob.mime_type,
+        size_bytes: base64ByteLength(blob.data_base64),
+        created_at: now,
+      };
+    }
+    resolved.push(annotation);
+  }
+
+  const trimmed = value.trim();
+  if (trimmed === "" && resolved.length === 0) {
+    throw new QueueError(400, "an answer must include text, a chosen option, or at least one annotation");
+  }
+
   const ticket: Ticket = {
     ...existing,
     status: "answered",
-    answer: value,
     answered_by: answeredBy,
     answered_at: now,
   };
+  if (trimmed !== "") {
+    ticket.answer = value;
+  }
+  if (resolved.length > 0) {
+    ticket.annotations = resolved;
+  }
 
   await store.put(ticket);
-  await store.appendAudit(makeAudit(id, "answered", now, answeredBy, value));
+  const answeredAudit = makeAudit(id, "answered", now, answeredBy, trimmed !== "" ? value : undefined);
+  if (resolved.length > 0) {
+    answeredAudit.annotation_count = resolved.length;
+  }
+  await store.appendAudit(answeredAudit);
   return ticket;
 }
 
@@ -241,6 +335,7 @@ export async function undo(store: TicketStore, id: string, now: string): Promise
 
   const reverted: Ticket = { ...ticket, status: "pending" };
   delete reverted.answer;
+  delete reverted.annotations;
   delete reverted.answered_by;
   delete reverted.answered_at;
 

@@ -3,11 +3,12 @@
  * stores closely enough to exercise the lifecycle; it is not a durability test.
  */
 
-import type { AuditEntry, Status, Ticket, TicketStore } from "../../src/core/types";
+import type { AuditEntry, MediaBlob, Status, Ticket, TicketStore } from "../../src/core/types";
 
 export class FakeTicketStore implements TicketStore {
   readonly tickets = new Map<string, Ticket>();
   readonly audit: AuditEntry[] = [];
+  readonly media = new Map<string, MediaBlob>();
 
   async load(): Promise<void> {
     // Nothing to load: state lives in memory for the duration of a test.
@@ -36,6 +37,15 @@ export class FakeTicketStore implements TicketStore {
 
   async appendAudit(entry: AuditEntry): Promise<void> {
     this.audit.push(entry);
+  }
+
+  async putMedia(blob: MediaBlob): Promise<void> {
+    this.media.set(blob.id, { ...blob });
+  }
+
+  async getMedia(id: string): Promise<MediaBlob | undefined> {
+    const blob = this.media.get(id);
+    return blob === undefined ? undefined : { ...blob };
   }
 
   countAudit(action: AuditEntry["action"]): number {

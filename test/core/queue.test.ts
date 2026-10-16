@@ -12,8 +12,10 @@ import {
   listResolved,
   resolveExpiry,
   undo,
+  uploadMedia,
 } from "../../src/core/queue";
 import { DEFAULT_TIMEOUT_SECONDS, RECENT_WINDOW_MS, UNDO_WINDOW_MS } from "../../src/core/constants";
+import { base64ByteLength, bytesToBase64 } from "../../src/core/media";
 import type { Ticket } from "../../src/core/types";
 
 const T0 = "2026-01-01T00:00:00.000Z";
@@ -272,4 +274,143 @@ test("listForPage returns pending tickets plus answered tickets inside the recen
     [pending.id],
     "an answered ticket older than the recent window must drop off the page",
   );
+});
+
+/* ------------------------------------------------------------------ *
+ * Media and annotations
+ * ------------------------------------------------------------------ */
+
+const PNG = bytesToBase64(new Uint8Array([137, 80, 78, 71]));
+
+test("enqueue stores media bytes, records a ref, and counts it in the audit entry", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(
+    store,
+    {
+      question: "Look?",
+      media: [
+        { mime_type: "image/png", data_base64: PNG, filename: "shot.png", caption: "before" },
+        { mime_type: "audio/mpeg", data_base64: PNG },
+      ],
+    },
+    { defaultStream: "alpha", now: T0 },
+  );
+
+  assert.equal(ticket.media?.length, 2);
+  const image = ticket.media?.[0];
+  assert.equal(image?.kind, "image");
+  assert.equal(image?.mime_type, "image/png");
+  assert.equal(image?.size_bytes, 4);
+  assert.equal(image?.filename, "shot.png");
+  assert.equal(image?.caption, "before");
+  assert.equal(ticket.media?.[1].kind, "audio");
+
+  // The bytes are in the media store, keyed by the ref id.
+  assert.ok(image?.id);
+  const blob = await store.getMedia(image!.id);
+  assert.equal(blob?.mime_type, "image/png");
+  assert.equal(blob?.data_base64, PNG);
+
+  assert.equal(store.audit[0].media_count, 2);
+});
+
+test("enqueue without media leaves media undefined and no media_count", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(store, { question: "Plain?" }, { defaultStream: "alpha", now: T0 });
+  assert.equal(ticket.media, undefined);
+  assert.equal(store.audit[0].media_count, undefined);
+});
+
+test("uploadMedia stores a blob and returns a ref (the POST /api/media path)", async () => {
+  const store = new FakeTicketStore();
+  const ref = await uploadMedia(store, { mime_type: "image/png", data_base64: PNG }, T0);
+  assert.equal(ref.kind, "image");
+  assert.equal(ref.size_bytes, base64ByteLength(PNG));
+  assert.deepEqual(await store.getMedia(ref.id), { id: ref.id, mime_type: "image/png", data_base64: PNG });
+});
+
+test("answer records annotations alongside the answer", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(
+    store,
+    { question: "Look?", media: [{ mime_type: "image/png", data_base64: PNG }] },
+    { defaultStream: "alpha", now: T0 },
+  );
+  const sourceId = ticket.media![0].id;
+  const rendered = await uploadMedia(store, { mime_type: "image/png", data_base64: PNG }, at(500));
+
+  const answered = await answer(store, ticket.id, "ship it", "human", at(1000), [
+    { text: "watch the header", media_id: sourceId, at_seconds: 3.5 },
+    { annotated_media_id: rendered.id, media_id: sourceId },
+  ]);
+
+  assert.equal(answered.answer, "ship it");
+  assert.equal(answered.status, "answered");
+  assert.equal(answered.annotations?.length, 2);
+  assert.equal(answered.annotations?.[0].text, "watch the header");
+  assert.equal(answered.annotations?.[0].media_id, sourceId);
+  assert.equal(answered.annotations?.[0].at_seconds, 3.5);
+  assert.equal(answered.annotations?.[1].annotated_media?.id, rendered.id);
+  assert.equal(answered.annotations?.[1].annotated_media?.kind, "image");
+
+  const auditEntry = store.audit.find((entry) => entry.action === "answered");
+  assert.equal(auditEntry?.annotation_count, 2);
+});
+
+test("answer accepts annotations with no text answer", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(store, { question: "Look?" }, { defaultStream: "alpha", now: T0 });
+  const answered = await answer(store, ticket.id, "", "human", at(1000), [{ text: "here" }]);
+  assert.equal(answered.answer, undefined, "an annotation-only answer has no answer text");
+  assert.equal(answered.annotations?.[0].text, "here");
+});
+
+test("answer with neither text nor annotations is a 400", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(store, { question: "Look?" }, { defaultStream: "alpha", now: T0 });
+  await assert.rejects(
+    () => answer(store, ticket.id, "   ", "human", at(1000), []),
+    (error: unknown) => error instanceof QueueError && error.status === 400,
+  );
+  assert.equal((await store.get(ticket.id))?.status, "pending", "the failed answer must not change the ticket");
+});
+
+test("answer rejects an annotation whose rendered copy is missing or not an image", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(store, { question: "Look?" }, { defaultStream: "alpha", now: T0 });
+
+  await assert.rejects(
+    () => answer(store, ticket.id, "yes", "human", at(1000), [{ annotated_media_id: "does-not-exist" }]),
+    (error: unknown) => error instanceof QueueError && error.status === 400,
+  );
+
+  const audio = await uploadMedia(store, { mime_type: "audio/mpeg", data_base64: PNG }, T0);
+  await assert.rejects(
+    () => answer(store, ticket.id, "yes", "human", at(1000), [{ annotated_media_id: audio.id }]),
+    (error: unknown) => error instanceof QueueError && error.status === 400,
+  );
+});
+
+test("undo clears annotations along with the answer", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(store, { question: "Look?" }, { defaultStream: "alpha", now: T0 });
+  await answer(store, ticket.id, "yes", "human", at(1000), [{ text: "note" }]);
+
+  const reverted = await undo(store, ticket.id, at(2000));
+  assert.equal(reverted.status, "pending");
+  assert.equal(reverted.answer, undefined);
+  assert.equal(reverted.annotations, undefined);
+});
+
+test("expiry applies the default answer and never carries annotations", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(
+    store,
+    { question: "Auto?", default_answer: "proceed", timeout_seconds: 60 },
+    { defaultStream: "alpha", now: T0 },
+  );
+  const resolved = await getResolved(store, ticket.id, at(60_001));
+  assert.equal(resolved?.status, "expired");
+  assert.equal(resolved?.answer, "proceed");
+  assert.equal(resolved?.annotations, undefined);
 });

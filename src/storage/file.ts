@@ -19,8 +19,9 @@
 import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 
-import { DEFAULT_STATE_DIR, ENV_STATE_DIR } from "../core/constants";
-import type { AuditEntry, Status, Ticket, TicketStore } from "../core/types";
+import { DEFAULT_STATE_DIR, ENV_STATE_DIR, MEDIA_DIR } from "../core/constants";
+import { base64ToBytes, bytesToBase64, isSafeMediaId } from "../core/media";
+import type { AuditEntry, MediaBlob, Status, Ticket, TicketStore } from "../core/types";
 
 const TICKETS_FILE = "tickets.json";
 const TICKETS_TMP_FILE = "tickets.json.tmp";
@@ -31,11 +32,25 @@ function log(message: string): void {
   process.stderr.write(`readyroom: ${message}\n`);
 }
 
+/** tmp -> fsync -> rename. A crash leaves the previous good file, never a partial one. */
+async function writeAtomic(path: string, bytes: Uint8Array): Promise<void> {
+  const tmp = `${path}.tmp`;
+  const handle = await open(tmp, "w");
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(tmp, path);
+}
+
 export class FileTicketStore implements TicketStore {
   private readonly stateDir: string;
   private readonly ticketsPath: string;
   private readonly ticketsTmpPath: string;
   private readonly auditPath: string;
+  private readonly mediaDir: string;
 
   /** In-memory mirror of `tickets.json`, keyed by ticket id. */
   private tickets = new Map<string, Ticket>();
@@ -52,6 +67,7 @@ export class FileTicketStore implements TicketStore {
     this.ticketsPath = join(stateDir, TICKETS_FILE);
     this.ticketsTmpPath = join(stateDir, TICKETS_TMP_FILE);
     this.auditPath = join(stateDir, AUDIT_FILE);
+    this.mediaDir = join(stateDir, MEDIA_DIR);
   }
 
   /**
@@ -153,6 +169,48 @@ export class FileTicketStore implements TicketStore {
         await handle.close();
       }
     });
+  }
+
+  /**
+   * Store a media blob as `<mediadir>/<id>` (raw bytes) with a sidecar
+   * `<mediadir>/<id>.json` carrying the MIME type. The sidecar exists because a raw
+   * file cannot say what it is, and `GET /api/media/{id}` needs the content type
+   * without consulting a ticket.
+   *
+   * Writes go through the same tmp -> fsync -> rename path as `tickets.json`, so a
+   * crash mid-write can never leave a truncated blob where a reader would find it.
+   */
+  async putMedia(blob: MediaBlob): Promise<void> {
+    if (!isSafeMediaId(blob.id)) {
+      throw new Error(`refusing to store media under an unsafe id: ${blob.id}`);
+    }
+    return this.serialize(async () => {
+      await mkdir(this.mediaDir, { recursive: true });
+      const bytes = base64ToBytes(blob.data_base64);
+      await writeAtomic(join(this.mediaDir, blob.id), bytes);
+      const meta = JSON.stringify({ mime_type: blob.mime_type, size_bytes: bytes.length });
+      await writeAtomic(join(this.mediaDir, `${blob.id}.json`), new TextEncoder().encode(meta));
+    });
+  }
+
+  /** The blob, or `undefined` for an unknown or unsafe id. Never throws on a bad id. */
+  async getMedia(id: string): Promise<MediaBlob | undefined> {
+    if (!isSafeMediaId(id)) {
+      return undefined;
+    }
+    let bytes: Buffer;
+    let metaRaw: string;
+    try {
+      bytes = await readFile(join(this.mediaDir, id));
+      metaRaw = await readFile(join(this.mediaDir, `${id}.json`), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
+    const meta = JSON.parse(metaRaw) as { mime_type: string };
+    return { id, mime_type: meta.mime_type, data_base64: bytesToBase64(bytes) };
   }
 
   /**

@@ -48,18 +48,21 @@ ask_human({
                               // when it is safe for the agent to proceed without a human.
   timeout_seconds?: number,   // optional. Default 1800. Max 86400.
   urgency?: "low" | "normal" | "blocking",  // optional. Default "normal".
-  stream?: string             // optional. Overrides the env/basename default.
-}) => { id: string, status: "pending", expires_at: string }
+  stream?: string,            // optional. Overrides the env/basename default.
+  media?: MediaInput[]        // optional. Screenshots, audio, video. Never required. See below.
+}) => { id: string, status: "pending", expires_at: string, media?: MediaRef[] }
 
 wait_for_answer({
   id: string,
   timeout_seconds?: number    // default 60, max 600
 }) => {
   id: string,
-  status: "pending" | "answered" | "expired",
+  status: "pending" | "answered" | "expired" | "cancelled",
   answer?: string,
   answered_by?: string,       // "human" | "default"
-  answered_at?: string
+  answered_at?: string,
+  media?: MediaRef[],         // the agent's attachments, echoed back
+  annotations?: Annotation[]  // the human's notes and any rendered markup copy
 }
 
 list_pending({}) => { tickets: Ticket[] }
@@ -68,6 +71,16 @@ cancel_ticket({ id: string }) => { id: string, status: "cancelled" }
 ```
 
 Tool result text must be unambiguous when it reaches the agent. Prefix a delivered answer with `HUMAN ANSWER:` so a model can never confuse it with its own earlier guess.
+
+### Media and annotations
+
+An agent may attach media to a ticket for the human to inspect. Media is **optional at every layer**: a ticket without media behaves exactly as before, and an answer is still valid with no annotations.
+
+- **Input.** `ask_human` takes `media?: MediaInput[]`, where `MediaInput` is `{ mime_type, data_base64, filename?, caption? }`. The MIME type must be an `image/*`, `audio/*`, or `video/*` family; the kind is derived from it, never sent separately. `data_base64` is standard base64 (an optional `data:<mime>;base64,` prefix is accepted). Limits: 8 items, 8 MiB per item, 24 MiB per ticket.
+- **Storage.** The bytes are stored out of band, keyed by a server-minted id; the ticket carries only a `MediaRef` (`{ id, kind, mime_type, filename?, caption?, size_bytes, created_at }`). This keeps `tickets.json` and `GET /api/tickets` small and lets the page fetch a blob lazily. `FileTicketStore` writes `${READYROOM_STATE_DIR}/media/<id>` plus a MIME sidecar; `DurableObjectTicketStore` chunks each blob across rows because a Cloudflare SQLite row is capped at 2 MB.
+- **Annotation.** The human may mark up an image (rectangle/freehand) and add notes; a note on audio/video captures the playhead position. On answer, a marked-up image is rendered to a PNG, uploaded with `POST /api/media`, and referenced from the annotation by `annotated_media_id`. An `Annotation` is `{ id, text?, media_id?, at_seconds?, annotated_media? }`.
+- **Return.** `wait_for_answer` returns the annotations as structured fields and any rendered markup as MCP `image` content, so an agent that only speaks MCP sees what the human marked without fetching a URL.
+- **Answer shape.** `POST /api/answer` accepts `{ id, answer?, answered_by?, annotations?: AnnotationInput[] }`. An answer must carry text, an option, or at least one annotation; none is a `400`.
 
 Transport per target:
 
@@ -85,8 +98,10 @@ GET  /healthz          -> 200, body "ok"
 GET  /                 -> the readyroom page (index.html)
 GET  /api/tickets      -> { tickets: Ticket[] }   pending + last 5 min of answered
 GET  /api/events       -> text/event-stream of ticket changes
-POST /api/answer       -> { id, answer, answered_by? } -> 200 | 404 | 409 already answered
+POST /api/answer       -> { id, answer?, answered_by?, annotations? } -> 200 | 400 | 404 | 409
 POST /api/undo         -> { id } -> 200 | 409 outside the undo window
+POST /api/media        -> { mime_type, data_base64 } -> 201 { media: MediaRef }
+GET  /api/media/{id}   -> the blob bytes, with Content-Type from the stored MIME
 ```
 
 Per-target notes on the same route table:

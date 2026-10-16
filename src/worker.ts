@@ -7,8 +7,10 @@
  *   GET  /                 -> 200 text/html, the inlined readyroom page
  *   GET  /api/tickets      -> 200 { tickets }                 (Bearer)
  *   GET  /api/events       -> 501 plain text                  (Bearer)
- *   POST /api/answer       -> 200 | 404 | 409                 (Bearer)
+ *   POST /api/answer       -> 200 | 400 | 404 | 409           (Bearer)
  *   POST /api/undo         -> 200 | 404 | 409                 (Bearer)
+ *   POST /api/media        -> 201 { media }                   (Bearer)  upload a blob
+ *   GET  /api/media/{id}   -> 200 the bytes | 404             (Bearer)  serve a blob
  *   POST /mcp/{stream}     -> the Streamable HTTP MCP endpoint (Origin-guarded)
  *   unknown route -> 404; known route, wrong method -> 405
  *
@@ -46,9 +48,11 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 
 import { WORKER_WAIT_CLAMP_SECONDS } from "./core/constants";
 import { constantTimeEqual } from "./core/constantTimeEqual";
-import { QueueError, answer as answerTicket, listForPage, undo as undoTicket } from "./core/queue";
+import { base64ToBytes, isSafeMediaId } from "./core/media";
+import { QueueError, answer as answerTicket, listForPage, undo as undoTicket, uploadMedia } from "./core/queue";
 import { TOOL_DEFINITIONS, handleToolCall } from "./core/tools";
-import type { AuditEntry, Status, Ticket, TicketStore, ToolResult } from "./core/types";
+import type { AuditEntry, MediaBlob, Status, Ticket, TicketStore, ToolResult } from "./core/types";
+import { ValidationError, validateAnnotationInputs, validateMediaUpload } from "./core/validation";
 import { DurableObjectTicketStore } from "./storage/durableObject";
 import type {
   DurableObjectNamespace,
@@ -330,13 +334,37 @@ async function handleAnswer(request: Request, deps: WorkerDeps): Promise<Respons
   } catch {
     return text("request body must be valid JSON", 400);
   }
-  if (!isRecord(body) || typeof body["id"] !== "string" || typeof body["answer"] !== "string") {
-    return text("body must be { id: string, answer: string, answered_by?: string }", 400);
+  if (!isRecord(body) || typeof body["id"] !== "string") {
+    return text(
+      "body must be { id: string, answer?: string, answered_by?: string, annotations?: AnnotationInput[] }",
+      400,
+    );
+  }
+  const rawAnswer = body["answer"];
+  if (rawAnswer !== undefined && rawAnswer !== null && typeof rawAnswer !== "string") {
+    return text("`answer` must be a string when present", 400);
   }
   const answeredBy = body["answered_by"] === "default" ? "default" : "human";
 
+  let annotations;
   try {
-    const ticket = await answerTicket(deps.store, body["id"], body["answer"], answeredBy, deps.now());
+    annotations = validateAnnotationInputs(body["annotations"]);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return text(error.message, 400);
+    }
+    throw error;
+  }
+
+  try {
+    const ticket = await answerTicket(
+      deps.store,
+      body["id"],
+      typeof rawAnswer === "string" ? rawAnswer : "",
+      answeredBy,
+      deps.now(),
+      annotations,
+    );
     return json({ ticket });
   } catch (error) {
     if (error instanceof QueueError) {
@@ -344,6 +372,51 @@ async function handleAnswer(request: Request, deps: WorkerDeps): Promise<Respons
     }
     throw error;
   }
+}
+
+/** `POST /api/media` — store a blob (used for a rendered annotation copy) and return its ref. */
+async function handleMediaUpload(request: Request, deps: WorkerDeps): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await readJsonBody(request);
+  } catch {
+    return text("request body must be valid JSON", 400);
+  }
+
+  let input;
+  try {
+    input = validateMediaUpload(body);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return text(error.message, 400);
+    }
+    throw error;
+  }
+
+  const media = await uploadMedia(deps.store, input, deps.now());
+  return json({ media }, 201);
+}
+
+/** `GET /api/media/{id}` — serve a stored blob with its content type. */
+async function handleMediaGet(id: string, deps: WorkerDeps): Promise<Response> {
+  if (!isSafeMediaId(id)) {
+    return text("Not Found", 404);
+  }
+  const blob = await deps.store.getMedia(id);
+  if (blob === undefined) {
+    return text("Not Found", 404);
+  }
+  const bytes = base64ToBytes(blob.data_base64);
+  // The DOM lib's BodyInit does not accept a `Uint8Array<ArrayBufferLike>` directly,
+  // but the Workers runtime does. The cast is the narrowest way to say so.
+  return new Response(bytes as unknown as BodyInit, {
+    status: 200,
+    headers: {
+      "content-type": blob.mime_type,
+      "content-length": String(bytes.length),
+      "cache-control": "no-store",
+    },
+  });
 }
 
 async function handleUndo(request: Request, deps: WorkerDeps): Promise<Response> {
@@ -393,6 +466,32 @@ export async function handleRequest(request: Request, env: WorkerEnv, deps: Work
       return text("Not Found", 404);
     }
     return deps.mcpHandler(request, extractStream(path));
+  }
+
+  // Media routes carry an id in the path, so they are matched before the exact table.
+  if (path === "/api/media") {
+    if (method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405, headers: { allow: "POST" } });
+    }
+    if (!requireBearer(request, env.READYROOM_TOKEN)) {
+      return text("Unauthorized", 401);
+    }
+    return handleMediaUpload(request, deps);
+  }
+  if (path.startsWith("/api/media/")) {
+    if (method !== "GET") {
+      return new Response("Method Not Allowed", { status: 405, headers: { allow: "GET" } });
+    }
+    if (!requireBearer(request, env.READYROOM_TOKEN)) {
+      return text("Unauthorized", 401);
+    }
+    let id: string;
+    try {
+      id = decodeURIComponent(path.slice("/api/media/".length));
+    } catch {
+      id = path.slice("/api/media/".length);
+    }
+    return handleMediaGet(id, deps);
   }
 
   const allowed = ROUTE_METHODS[path];
@@ -490,6 +589,11 @@ export class QueueDurableObject {
         case "appendAudit":
           await this.store.appendAudit(payload.args as AuditEntry);
           return json({ result: null });
+        case "putMedia":
+          await this.store.putMedia(payload.args as MediaBlob);
+          return json({ result: null });
+        case "getMedia":
+          return json({ result: await this.store.getMedia(payload.args as string) });
         default:
           return json({ error: `unknown durable object op \`${String(payload.op)}\`` }, 400);
       }
@@ -543,6 +647,14 @@ class DurableObjectStoreClient implements TicketStore {
 
   appendAudit(entry: AuditEntry): Promise<void> {
     return this.call<void>("appendAudit", entry);
+  }
+
+  putMedia(blob: MediaBlob): Promise<void> {
+    return this.call<void>("putMedia", blob);
+  }
+
+  getMedia(id: string): Promise<MediaBlob | undefined> {
+    return this.call<MediaBlob | undefined>("getMedia", id);
   }
 }
 

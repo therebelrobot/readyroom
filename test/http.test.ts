@@ -20,6 +20,7 @@ import type { HttpApp } from "../src/http";
 import { createMcpServer, attachStreamableHttp } from "../src/mcp";
 import { FileTicketStore } from "../src/storage/file";
 import { enqueue } from "../src/core/queue";
+import { bytesToBase64 } from "../src/core/media";
 import type { Ticket } from "../src/core/types";
 
 const TOKEN = "test-token";
@@ -270,6 +271,97 @@ test("unknown route is 404; known route with the wrong method is 405", async () 
   try {
     assert.equal((await fetch(`${harness.base}/nope`)).status, 404);
     assert.equal((await fetch(`${harness.base}/healthz`, { method: "POST" })).status, 405);
+  } finally {
+    await harness.stop();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Media and annotations
+ * ------------------------------------------------------------------ */
+
+const IMAGE_BYTES = bytesToBase64(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+
+test("POST /api/media stores a blob and GET /api/media/{id} serves it", async () => {
+  const harness = await startHarness();
+  try {
+    const anon = await fetch(`${harness.base}/api/media`, { method: "POST" });
+    assert.equal(anon.status, 401, "media upload must require the token");
+
+    const upload = await postJson(`${harness.base}/api/media`, {
+      mime_type: "image/png",
+      data_base64: IMAGE_BYTES,
+    });
+    assert.equal(upload.status, 201);
+    const body = (await upload.json()) as { media: { id: string; kind: string } };
+    assert.equal(body.media.kind, "image");
+    assert.ok(body.media.id);
+
+    const served = await fetch(`${harness.base}/api/media/${body.media.id}`, { headers: AUTHORIZATION });
+    assert.equal(served.status, 200);
+    assert.match(served.headers.get("content-type") ?? "", /image\/png/);
+    assert.deepEqual([...new Uint8Array(await served.arrayBuffer())], [137, 80, 78, 71, 13, 10, 26, 10]);
+
+    const noAuth = await fetch(`${harness.base}/api/media/${body.media.id}`);
+    assert.equal(noAuth.status, 401);
+
+    const missing = await fetch(`${harness.base}/api/media/does-not-exist`, { headers: AUTHORIZATION });
+    assert.equal(missing.status, 404);
+
+    const wrongMethod = await fetch(`${harness.base}/api/media`, { headers: AUTHORIZATION });
+    assert.equal(wrongMethod.status, 405);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("POST /api/answer accepts annotations, including a rendered copy, and they appear on the page payload", async () => {
+  const harness = await startHarness();
+  try {
+    const ticket = await enqueue(
+      harness.store,
+      { question: "Look?", media: [{ mime_type: "image/png", data_base64: IMAGE_BYTES }] },
+      { defaultStream: "alpha", now: new Date().toISOString() },
+    );
+
+    const upload = await postJson(`${harness.base}/api/media`, {
+      mime_type: "image/png",
+      data_base64: IMAGE_BYTES,
+    });
+    const rendered = (await upload.json()) as { media: { id: string } };
+
+    const answered = await postJson(`${harness.base}/api/answer`, {
+      id: ticket.id,
+      answer: "ship it",
+      annotations: [
+        { text: "watch this", media_id: ticket.media![0].id, at_seconds: 2.5 },
+        { annotated_media_id: rendered.media.id, media_id: ticket.media![0].id },
+      ],
+    });
+    assert.equal(answered.status, 200);
+    const answeredBody = (await answered.json()) as { ticket: Ticket };
+    assert.equal(answeredBody.ticket.annotations?.length, 2);
+
+    const page = await fetch(`${harness.base}/api/tickets`, { headers: AUTHORIZATION });
+    const pageBody = (await page.json()) as { tickets: Ticket[] };
+    const recorded = pageBody.tickets.find((t) => t.id === ticket.id);
+    assert.equal(recorded?.annotations?.length, 2);
+    assert.equal(recorded?.annotations?.[1].annotated_media?.id, rendered.media.id);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("POST /api/answer with neither text nor annotations is 400", async () => {
+  const harness = await startHarness();
+  try {
+    const ticket = await enqueue(
+      harness.store,
+      { question: "Look?" },
+      { defaultStream: "alpha", now: new Date().toISOString() },
+    );
+    const response = await postJson(`${harness.base}/api/answer`, { id: ticket.id, answer: "" });
+    assert.equal(response.status, 400);
   } finally {
     await harness.stop();
   }

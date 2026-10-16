@@ -9,7 +9,7 @@
  * later, never in a tight loop. It is written accordingly.
  */
 
-import type { Ticket, TicketStore, ToolResult, WaitForAnswerOutput } from "./types";
+import type { Ticket, TicketStore, ToolContent, ToolResult, WaitForAnswerOutput } from "./types";
 import {
   ValidationError,
   validateAskHuman,
@@ -45,6 +45,8 @@ const ASK_HUMAN_DESCRIPTION = [
   "Protocol you must follow: on `pending`, continue with independent work and call `wait_for_answer` again later — do not poll in a tight loop.",
   "",
   "Set `default_answer` only when it is safe for you to proceed without a human; it is used only if the ticket expires. Set `options` for 2-5 mutually exclusive choices. `timeout_seconds` defaults to 1800 and maxes at 86400. `urgency` defaults to \"normal\".",
+  "",
+  "Optionally attach `media` (screenshots, audio, or video) for the human to inspect — media is never required. Each item is { mime_type, data_base64 } with optional `filename` and `caption`; `data_base64` is standard base64 (a `data:<mime>;base64,` prefix is accepted). The human may answer with a decision, with annotations on your media, or both; `wait_for_answer` returns any annotations, and rendered markup comes back as image content.",
 ].join("\n");
 
 const WAIT_FOR_ANSWER_DESCRIPTION = [
@@ -102,6 +104,29 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         stream: {
           type: "string",
           description: "Optional. Overrides the configured default stream for this ticket.",
+        },
+        media: {
+          type: "array",
+          maxItems: 8,
+          description:
+            "Optional. Media (screenshots, audio, video) for the human to inspect. Never required.",
+          items: {
+            type: "object",
+            properties: {
+              mime_type: {
+                type: "string",
+                description: "An image/*, audio/*, or video/* type, e.g. \"image/png\".",
+              },
+              data_base64: {
+                type: "string",
+                description: "Standard base64 bytes. A `data:<mime>;base64,` prefix is accepted.",
+              },
+              filename: { type: "string", description: "Optional. A display name, e.g. \"before.png\"." },
+              caption: { type: "string", description: "Optional. A caption shown with the attachment." },
+            },
+            required: ["data_base64"],
+            additionalProperties: false,
+          },
         },
       },
       required: ["question"],
@@ -209,13 +234,84 @@ function waitOutput(ticket: Ticket): Record<string, unknown> {
   if (ticket.answered_at !== undefined) {
     out.answered_at = ticket.answered_at;
   }
+  if (ticket.media !== undefined) {
+    out.media = ticket.media;
+  }
+  if (ticket.annotations !== undefined) {
+    out.annotations = ticket.annotations;
+  }
   return { ...out };
+}
+
+/**
+ * A one-line summary of the annotations, so an agent reading only the text content
+ * still knows the human left feedback beyond the answer.
+ */
+function annotationSummary(ticket: Ticket): string | undefined {
+  const annotations = ticket.annotations;
+  if (annotations === undefined || annotations.length === 0) {
+    return undefined;
+  }
+  const notes = annotations.filter((annotation) => annotation.text !== undefined).length;
+  const markup = annotations.filter((annotation) => annotation.annotated_media !== undefined).length;
+  const parts: string[] = [];
+  if (notes > 0) {
+    parts.push(`${notes} note${notes === 1 ? "" : "s"}`);
+  }
+  if (markup > 0) {
+    parts.push(`${markup} annotated image${markup === 1 ? "" : "s"}`);
+  }
+  return `The human also left ${annotations.length} annotation(s) (${parts.join(", ")}); see the attached content and the structured "annotations" field.`;
+}
+
+/**
+ * Build the `wait_for_answer` result: the text answer plus, for any annotation that
+ * carries a rendered markup copy, the image content itself. Handing the bytes back
+ * inline is what makes an annotation useful to an agent that only speaks MCP — it does
+ * not have to fetch a URL to see what the human drew.
+ */
+async function waitResult(ticket: Ticket, waitedSeconds: number, store: TicketStore): Promise<ToolResult> {
+  const content: ToolContent[] = [{ type: "text", text: waitText(ticket, waitedSeconds) }];
+
+  if (ticket.status === "answered" && ticket.annotations !== undefined) {
+    for (const annotation of ticket.annotations) {
+      const ref = annotation.annotated_media;
+      if (ref === undefined) {
+        continue;
+      }
+      const blob = await store.getMedia(ref.id);
+      if (blob === undefined) {
+        continue;
+      }
+      if (ref.kind === "image") {
+        content.push({ type: "image", data: blob.data_base64, mimeType: blob.mime_type });
+      } else if (ref.kind === "audio") {
+        content.push({ type: "audio", data: blob.data_base64, mimeType: blob.mime_type });
+      }
+    }
+  }
+
+  return { content, structuredContent: waitOutput(ticket) };
 }
 
 function waitText(ticket: Ticket, waitedSeconds: number): string {
   switch (ticket.status) {
-    case "answered":
-      return answerText(ticket.answer, ticket.answered_by);
+    case "answered": {
+      // A human answer always carries the HUMAN ANSWER prefix, including the case where
+      // the human responded with annotations only. The model must never mistake a human
+      // response for its own earlier guess, and an annotation-only answer is still a
+      // human response.
+      const lines: string[] = [
+        ticket.answer !== undefined && ticket.answer !== ""
+          ? answerText(ticket.answer, ticket.answered_by)
+          : "HUMAN ANSWER: (no text; the human responded with annotations only — see the attached content)",
+      ];
+      const summary = annotationSummary(ticket);
+      if (summary !== undefined) {
+        lines.push(summary);
+      }
+      return lines.join("\n\n");
+    }
     case "expired":
       return ticket.answer !== undefined
         ? `DEFAULT ANSWER (applied on expiry; no human responded): ${ticket.answer}`
@@ -235,18 +331,25 @@ async function runAskHuman(args: unknown, deps: ToolDeps): Promise<ToolResult> {
     now: deps.now(),
   });
 
+  const mediaCount = ticket.media?.length ?? 0;
+  const mediaText = mediaCount > 0 ? `, ${mediaCount} media attachment(s)` : "";
   const text =
     `Ticket ${ticket.id} enqueued (stream "${ticket.stream}", urgency ${ticket.urgency}, ` +
-    `status pending, expires_at ${ticket.expires_at}). Continue with independent work and call ` +
+    `status pending${mediaText}, expires_at ${ticket.expires_at}). Continue with independent work and call ` +
     `wait_for_answer with id "${ticket.id}" later. Do not poll in a tight loop.`;
 
-  return textResult(text, {
+  const structured: Record<string, unknown> = {
     id: ticket.id,
     status: "pending",
     stream: ticket.stream,
     urgency: ticket.urgency,
     expires_at: ticket.expires_at,
-  });
+  };
+  if (ticket.media !== undefined) {
+    structured.media = ticket.media;
+  }
+
+  return textResult(text, structured);
 }
 
 async function runWaitForAnswer(args: unknown, deps: ToolDeps): Promise<ToolResult> {
@@ -263,10 +366,10 @@ async function runWaitForAnswer(args: unknown, deps: ToolDeps): Promise<ToolResu
       throw notFound(input.id);
     }
     if (ticket.status !== "pending") {
-      return textResult(waitText(ticket, effective), waitOutput(ticket));
+      return waitResult(ticket, effective, deps.store);
     }
     if (Date.now() >= deadline) {
-      return textResult(waitText(ticket, effective), waitOutput(ticket));
+      return waitResult(ticket, effective, deps.store);
     }
     await sleep(POLL_INTERVAL_MS);
   }
