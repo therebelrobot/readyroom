@@ -124,8 +124,7 @@ export async function attachStdio(server: Server): Promise<StdioServerTransport>
 }
 
 export interface StreamableHttpHandle {
-  transport: StreamableHTTPServerTransport;
-  /** Mount at `/mcp`. Applies the Origin guard, then delegates to the transport. */
+  /** Mount at `/mcp`. Applies the Origin guard, then delegates to a per-request transport. */
   handle: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   close: () => Promise<void>;
 }
@@ -144,20 +143,21 @@ export interface StreamableHttpOptions {
  * short-lived MCP clients over one port, and per-session state would only add
  * reconnect friction for no benefit.
  *
+ * The SDK forbids reusing a stateless transport across requests ("Stateless transport
+ * cannot be reused across requests. Create a new transport per request."), so each
+ * request gets a FRESH `Server` and a FRESH `StreamableHTTPServerTransport`, connected
+ * for the life of that one request and closed when it finishes. `serverFactory` builds
+ * the per-request `Server` over the same `ToolDeps`; tool handling is stateless, so a
+ * new instance per request is correct and expected.
+ *
  * The Origin guard runs BEFORE `transport.handleRequest`, per the spec: "reject requests
  * with a missing or mismatched `Origin` on the Streamable HTTP MCP endpoint with 403."
  */
 export async function attachStreamableHttp(
-  server: Server,
+  serverFactory: () => Server,
   options: StreamableHttpOptions,
 ): Promise<StreamableHttpHandle> {
   const log = options.log ?? ((message: string) => process.stderr.write(`readyroom: ${message}\n`));
-
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-  });
-  await server.connect(transport);
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (!checkOrigin(req, options.allowedOrigins)) {
@@ -166,7 +166,16 @@ export async function attachStreamableHttp(
       return;
     }
 
+    // A stateless transport serves exactly one request, so build a fresh Server and
+    // transport per request and tear them down when the request completes.
+    const server = serverFactory();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+
     try {
+      await server.connect(transport);
       await transport.handleRequest(req, res);
     } catch (error) {
       log(`mcp transport error on port ${options.port}: ${error instanceof Error ? error.message : String(error)}`);
@@ -174,12 +183,17 @@ export async function attachStreamableHttp(
         res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
         res.end("Internal Server Error");
       }
+    } finally {
+      // `server.close()` closes the transport it is connected to; close both defensively.
+      await transport.close().catch(() => { });
+      await server.close().catch(() => { });
     }
   };
 
   return {
-    transport,
     handle,
-    close: () => transport.close(),
+    close: async () => {
+      // Nothing persistent to release: each request owns and closes its own transport.
+    },
   };
 }

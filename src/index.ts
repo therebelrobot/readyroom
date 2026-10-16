@@ -68,9 +68,9 @@ async function runDaemon(config: Config, defaultStream: string): Promise<void> {
 
   const allowedOrigins = buildAllowedOrigins(config.port, config.allowedOrigins);
 
-  // Streamable HTTP MCP, mounted at /mcp on the same HTTP server. Its own Server
-  // instance, because a Protocol may only be connected to one transport.
-  const mcp = await attachStreamableHttp(createMcpServer(deps), {
+  // Streamable HTTP MCP, mounted at /mcp on the same HTTP server. A factory, because the
+  // stateless transport serves one request each and needs a fresh Server per request.
+  const mcp = await attachStreamableHttp(() => createMcpServer(deps), {
     port: config.port,
     allowedOrigins,
     log,

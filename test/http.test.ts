@@ -45,7 +45,7 @@ async function startHarness(): Promise<Harness> {
   });
   const port = (server.address() as AddressInfo).port;
 
-  const mcp = await attachStreamableHttp(createMcpServer({ store, now }), {
+  const mcp = await attachStreamableHttp(() => createMcpServer({ store, now }), {
     port,
     allowedOrigins: [`http://127.0.0.1:${port}`],
   });
@@ -199,6 +199,44 @@ test("POST /internal/tool-call runs a tool and honours the forwarded stream", as
     const result = (await response.json()) as { structuredContent: { status: string; stream: string } };
     assert.equal(result.structuredContent.status, "pending");
     assert.equal(result.structuredContent.stream, "beta-agent", "the forwarded stream must label the ticket");
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("POST /mcp serves two sequential requests on one handle (stateless transport is not reused)", async () => {
+  const harness = await startHarness();
+  try {
+    const origin = `http://127.0.0.1:${harness.port}`;
+    const initialize = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "readyroom-test", version: "0.0.0" },
+      },
+    };
+
+    const post = (): Promise<Response> =>
+      fetch(`${harness.base}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          origin,
+        },
+        body: JSON.stringify(initialize),
+      });
+
+    const first = await post();
+    assert.equal(first.status, 200, "the first POST /mcp must succeed");
+
+    // A stateless transport may serve exactly one request. Reusing it makes the SDK
+    // throw, which the handler swallows into a 500 with an empty body.
+    const second = await post();
+    assert.equal(second.status, 200, "the second POST /mcp must not 500 (stateless transport reuse)");
   } finally {
     await harness.stop();
   }
