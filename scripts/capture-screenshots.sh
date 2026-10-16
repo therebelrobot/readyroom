@@ -13,6 +13,8 @@
 #   pending-single        one ticket, context, free-text answer only
 #   pending-options       a ticket with option buttons
 #   pending-multi-stream  tickets from several streams, grouped headings
+#   pending-media         a ticket with an attached screenshot, expanded for inspection
+#   media-annotated       the attachment marked up with a box, plus a note queued
 #   option-selected       an option picked (aria-pressed, selection marker)
 #   card-error            submitting an empty answer shows the inline card error
 #   recent-answered       an answered ticket in "Recent" with its Undo button
@@ -156,6 +158,28 @@ create_ticket() { # args-json (the ask_human `args` object)
     "$BASE_URL/internal/tool-call" >/dev/null
 }
 
+# A ticket carrying a real generated PNG, so the media states are exercised end to end.
+# The image is built with node (a gradient, so markup is visible) rather than committed
+# as a binary fixture.
+create_media_ticket() {
+  local body
+  body="$(mktemp)"
+  node -e '
+    const zlib = require("zlib");
+    function crc32(buf){let c=~0;for(let i=0;i<buf.length;i++){c^=buf[i];for(let k=0;k<8;k++)c=(c>>>1)^(0xEDB88320&-(c&1));}return (~c)>>>0;}
+    function chunk(type,data){const len=Buffer.alloc(4);len.writeUInt32BE(data.length);const t=Buffer.from(type,"ascii");const crc=Buffer.alloc(4);crc.writeUInt32BE(crc32(Buffer.concat([t,data])));return Buffer.concat([len,t,data,crc]);}
+    const W=360,H=220;
+    const raw=Buffer.alloc(H*(1+W*3));
+    for(let y=0;y<H;y++){const row=y*(1+W*3);raw[row]=0;for(let x=0;x<W;x++){const o=row+1+x*3;raw[o]=Math.floor(255*x/W);raw[o+1]=Math.floor(255*y/H);raw[o+2]=160;}}
+    const ihdr=Buffer.alloc(13);ihdr.writeUInt32BE(W,0);ihdr.writeUInt32BE(H,4);ihdr[8]=8;ihdr[9]=2;
+    const png=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk("IHDR",ihdr),chunk("IDAT",zlib.deflateSync(raw)),chunk("IEND",Buffer.alloc(0))]);
+    const body={name:"ask_human",args:{stream:"design-review",question:"Does this dashboard layout look right?",options:["Ship it","Fix it"],context:"Rendered at 1280x800.",media:[{mime_type:"image/png",data_base64:png.toString("base64"),filename:"dashboard-before.png",caption:"current render"}]}};
+    process.stdout.write(JSON.stringify(body));
+  ' > "$body"
+  curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' --data @"$body" "$BASE_URL/internal/tool-call" >/dev/null
+  rm -f "$body"
+}
+
 # ── run ─────────────────────────────────────────────────────────────────────
 
 if [ "$EXTERNAL" = "1" ]; then
@@ -213,7 +237,7 @@ pw -s=human run-code "async page => { await page.getByRole('button', { name: '2.
 shot human option-selected
 
 # Inline validation error: submit an empty answer on the api-server card.
-pw -s=human run-code "async page => { await page.locator('article', { hasText: 'Should the retry budget be 3 attempts or 5?' }).getByRole('button', { name: 'Answer' }).click(); await page.waitForSelector('text=Type an answer or pick an option first.'); }" >/dev/null
+pw -s=human run-code "async page => { await page.locator('article', { hasText: 'Should the retry budget be 3 attempts or 5?' }).getByRole('button', { name: 'Answer' }).click(); await page.waitForSelector('text=Type an answer, pick an option, or add an annotation first.'); }" >/dev/null
 shot human card-error
 
 # Answered ticket: type a free-text answer and submit it, so it lands in "Recent".
@@ -240,5 +264,21 @@ pw -s=loaderr route "**/api/tickets" --status=500 >/dev/null
 login loaderr
 wait_for_text loaderr "Could not load tickets"
 shot loaderr load-error
+
+# ── media + annotations ─────────────────────────────────────────────────────
+# A dedicated session, so the expanded media card is the subject rather than one card
+# among many. The element-scoped shots capture the whole card even when it is tall.
+open_actor media "$DESKTOP_W" "$DESKTOP_H"
+login media
+create_media_ticket
+wait_for_text media "Does this dashboard layout look right?"
+pw -s=media run-code "async page => { var card = page.locator('article', { hasText: 'Does this dashboard layout look right?' }); await card.getByRole('button', { name: /Show 1 attachment/ }).click(); await card.locator('canvas').waitFor(); await card.scrollIntoViewIfNeeded(); }" >/dev/null
+pw -s=media screenshot --filename="$OUT_ROOT/pending-media.png" "article:has(canvas)" >/dev/null
+echo "captured pending-media.png"
+
+# Mark it up with a box and queue a note, so the annotation state is represented.
+pw -s=media run-code "async page => { var card = page.locator('article', { hasText: 'Does this dashboard layout look right?' }); await card.evaluate(function(article){ var c=article.querySelector('canvas'); var r=c.getBoundingClientRect(); function pe(t,x,y){ c.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,pointerId:1,button:0,buttons:t==='pointerup'?0:1,clientX:x,clientY:y})); } pe('pointerdown',r.left+60,r.top+50); pe('pointermove',r.left+r.width-60,r.top+40); pe('pointermove',r.left+r.width-60,r.top+r.height-40); pe('pointerup',r.left+r.width-60,r.top+r.height-40); }); await card.locator('input[placeholder=\"Add a note\"]').fill('nudge the title left by 8px'); await card.getByRole('button', { name: 'Add note' }).click(); await card.locator('text=nudge the title left by 8px').waitFor(); }" >/dev/null
+pw -s=media screenshot --filename="$OUT_ROOT/media-annotated.png" "article:has(canvas)" >/dev/null
+echo "captured media-annotated.png"
 
 echo "all screenshots written to $OUT_ROOT"

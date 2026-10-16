@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FileTicketStore } from "../../src/storage/file";
+import { bytesToBase64 } from "../../src/core/media";
 import type { AuditEntry, Ticket } from "../../src/core/types";
 
 const T0 = "2026-01-01T00:00:00.000Z";
@@ -137,4 +138,39 @@ test("no tickets.json.tmp is left behind after a successful put()", async () => 
   // The real file is present and parseable.
   const raw = await readFile(join(dir, "tickets.json"), "utf8");
   assert.equal(JSON.parse(raw).length, 1);
+});
+
+test("media survives a fresh store instance over the same directory", async () => {
+  const dir = await makeDir();
+  const id = "11111111-1111-4111-8111-111111111111";
+  const data = bytesToBase64(new Uint8Array([1, 2, 3, 4, 5]));
+
+  const first = new FileTicketStore(dir);
+  await first.load();
+  await first.putMedia({ id, mime_type: "image/png", data_base64: data });
+
+  const second = new FileTicketStore(dir);
+  await second.load();
+  assert.deepEqual(await second.getMedia(id), { id, mime_type: "image/png", data_base64: data });
+});
+
+test("getMedia returns undefined for an unknown or unsafe id", async () => {
+  const dir = await makeDir();
+  const store = new FileTicketStore(dir);
+  await store.load();
+  await store.putMedia({ id: "abc-123", mime_type: "image/png", data_base64: bytesToBase64(new Uint8Array([1])) });
+
+  assert.equal(await store.getMedia("missing"), undefined);
+  assert.equal(await store.getMedia("../tickets.json"), undefined, "traversal must not read outside the media dir");
+  assert.equal(await store.getMedia("a/b"), undefined);
+});
+
+test("putMedia refuses an unsafe id", async () => {
+  const dir = await makeDir();
+  const store = new FileTicketStore(dir);
+  await store.load();
+  await assert.rejects(() =>
+    store.putMedia({ id: "../escape", mime_type: "image/png", data_base64: bytesToBase64(new Uint8Array([1])) }),
+  );
+  await assert.rejects(() => stat(join(dir, "escape")), { code: "ENOENT" });
 });

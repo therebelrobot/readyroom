@@ -13,6 +13,7 @@ create one, see the [README](../README.md). For the API the page talks to, see t
   - [The token gate](#the-token-gate)
   - [Reading the board](#reading-the-board)
   - [Answering a ticket](#answering-a-ticket)
+  - [Media and annotations](#media-and-annotations)
   - [Keyboard shortcuts](#keyboard-shortcuts)
   - [Urgency levels](#urgency-levels)
   - [Streams](#streams)
@@ -99,12 +100,47 @@ Answer rules:
 
 - **Free text wins over a picked option.** If you type text *and* have an option selected, the
   typed text is submitted as the answer.
-- **One of the two is required.** Submitting with neither shows an inline, per-card error —
-  `Type an answer or pick an option first.` — and does not send anything.
+- **One is required — unless you annotate.** Submitting with no text, no option, and no
+  annotation shows an inline, per-card error — `Type an answer, pick an option, or add an
+  annotation first.` — and does not send anything.
 - Submitting posts to `POST /api/answer` and the card then moves to the **Recent** section.
 
 A confirmation banner is never shown; the card leaving Pending and appearing in Recent *is* the
 confirmation.
+
+## Media and annotations
+
+An agent can attach **screenshots, audio, or video** to a ticket for you to inspect. Media is
+optional — most tickets have none, and a ticket with media is answered exactly like one without.
+When a ticket has attachments, its card shows a **Show N attachments for inspection** toggle.
+
+**Expand to inspect.** The toggle reveals each attachment with its name, type, size, and any
+caption. Images open on a drawing canvas; audio and video get their own player:
+
+![A ticket with an attached screenshot expanded: the image on a drawing canvas with Box, Draw, and Clear markup tools, above the optional annotations editor.](screenshots/pending-media.png)
+
+**Mark up an image.** With an image expanded, the **Box** and **Draw** tools let you put a
+rectangle or a freehand mark on it; **Clear markup** removes everything you have drawn. Markup is
+drawn at the image's own resolution, not the size shown on screen.
+
+**Add a note.** The **Annotations (optional)** area under the attachments takes free-text notes.
+The dropdown beside the note field chooses what the note is about — *Whole ticket*, or a specific
+attachment. For an audio or video attachment, a note captures the current playback position, and
+the note list shows it as a timestamp you can read back:
+
+![The attached image marked up with a red box, with a queued note in the annotations editor.](screenshots/media-annotated.png)
+
+Notes you have added are listed above the field, each with a **Remove** button. Everything you
+draw and every note you add is sent back with your answer — but **an annotation on its own is a
+valid answer**, so you can respond with markup and no typed text.
+
+When you answer, any image you marked up is rendered to a PNG and sent with the answer. The agent
+receives your notes as structured data and the marked-up image itself, so it can see exactly what
+you circled. An answered card in **Recent** shows the source media plus an **Annotations** list,
+including the annotated image:
+
+Annotations are optional, and none of this is required to drain a ticket. Attachments are fetched
+from `GET /api/media/{id}` with your token, and only when you expand a card.
 
 ## Keyboard shortcuts
 

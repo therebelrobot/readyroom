@@ -140,6 +140,54 @@
   .recent .card { border-style: dashed; }
   .empty { color: var(--muted); font-style: italic; }
 
+  /* Media is fetched with the Bearer token (fetch, not <img src>), then shown from an
+     object URL. Expansion is a real <button> (keyboard-operable); drawing never relies
+     on hover; nothing is colour-only. */
+  .media-section { margin: 10px 0; }
+  .media-toggle { width: 100%; text-align: left; }
+  .media-list[hidden] { display: none; }
+  .media-item { border: 1px solid var(--line-soft); padding: 8px; margin: 8px 0; }
+  .media-item figcaption { font-size: 0.8rem; color: var(--muted); margin-bottom: 6px; }
+  .media-stage { margin: 6px 0; }
+  .media-stage img, .media-stage video, .media-stage audio { max-width: 100%; display: block; }
+  .media-stage video { background: #000; }
+  .media-stage canvas {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    touch-action: none;
+    cursor: crosshair;
+    border: 1px solid var(--line-soft);
+  }
+  .media-tools { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+  .media-tools button[aria-pressed="true"] { border-style: double; border-width: 4px; font-weight: bold; }
+  .media-status { font-size: 0.8rem; color: var(--muted); }
+  .annotations { border-top: 1px dashed var(--line-soft); margin-top: 10px; padding-top: 8px; }
+  .annotations h4 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 6px 0; }
+  .note { border: 1px solid var(--line-soft); padding: 6px 8px; margin: 6px 0; font-size: 0.9rem; }
+  .note-text { white-space: pre-wrap; }
+  .note-meta { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+  .note-add { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .note-add input[type="text"] {
+    flex: 1 1 200px;
+    min-height: 44px;
+    padding: 8px;
+    font: inherit;
+    border: 2px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+  }
+  .note-add select {
+    min-height: 44px;
+    padding: 8px;
+    font: inherit;
+    border: 2px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+  }
+  .annotation-image { margin: 8px 0; }
+  .annotation-image img { max-width: 100%; border: 1px solid var(--line-soft); }
+
   .hint { color: var(--muted); font-size: 0.8rem; margin-top: 24px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
   kbd { border: 1px solid var(--line); padding: 0 4px; font: inherit; font-size: 0.8rem; }
 
@@ -191,7 +239,7 @@
     </section>
   </main>
 
-  <p class="hint">No markdown rendering. Context is shown as plain text with line breaks preserved.</p>
+  <p class="hint">No markdown rendering. Context is shown as plain text with line breaks preserved. Attached media is fetched with your token only when you expand a ticket, and never from an external origin.</p>
 
   <noscript>
     <div class="banner"><span class="tag">Error:</span> This page needs JavaScript to drain the queue.</div>
@@ -214,7 +262,27 @@
     live: false,
     error: "",
     choices: {},
-    drafts: {}
+    drafts: {},
+    /* Media and annotation state, all keyed so it survives the polling re-render:
+       notes[ticketId] -> [{ text, media_id?, at_seconds? }]
+       noteDrafts[key] -> in-progress note text (key = ticketId + ":" + (mediaId||""))
+       shapes[mediaId] -> [{ tool: "box"|"draw", ... }] in the image's natural pixels
+       expanded[ticketId] -> whether the attachment list is open
+       mediaUrls[mediaId] -> object URL of the fetched blob (never revoked; ids are immutable) */
+    notes: {},
+    noteDrafts: {},
+    noteTargets: {},
+    shapes: {},
+    canvasScale: {},
+    tool: "box",
+    expanded: {},
+    mediaUrls: {},
+    mediaPending: {},
+    mediaErrors: {},
+    /* True while a stroke is in progress, so a poll does not replace the canvas
+       mid-drag; the pending render runs when the stroke ends. */
+    drawing: false,
+    renderQueued: false
   };
 
   var els = {
@@ -278,7 +346,8 @@
     }).then(function (data) {
       state.tickets = (data && data.tickets) || [];
       state.error = "";
-      render();
+      // Do not replace the DOM mid-stroke; queue the render for when the stroke ends.
+      if (state.drawing) { state.renderQueued = true; } else { render(); }
     }).catch(function (err) {
       if (err && err.unauthorized) { return; }
       state.error = "Could not load tickets: " + (err && err.message ? err.message : "network error");
@@ -425,6 +494,463 @@
     return Math.floor(h / 24) + "d";
   }
 
+  /* ---------------- media + annotations ---------------- */
+
+  function formatBytes(n) {
+    if (typeof n !== "number" || !isFinite(n)) { return "?"; }
+    if (n < 1024) { return n + " B"; }
+    if (n < 1024 * 1024) { return (n / 1024).toFixed(1) + " KiB"; }
+    return (n / (1024 * 1024)).toFixed(1) + " MiB";
+  }
+
+  function formatTime(seconds) {
+    var s = Math.max(0, Math.floor(seconds));
+    var m = Math.floor(s / 60);
+    var rest = s % 60;
+    return m + ":" + (rest < 10 ? "0" : "") + rest;
+  }
+
+  function findMedia(ticket, id) {
+    var media = ticket.media || [];
+    for (var i = 0; i < media.length; i++) { if (media[i].id === id) { return media[i]; } }
+    return null;
+  }
+
+  function mediaName(ticket, id) {
+    var media = ticket.media || [];
+    for (var i = 0; i < media.length; i++) {
+      if (media[i].id === id) { return media[i].filename || ("attachment " + (i + 1) + " (" + media[i].kind + ")"); }
+    }
+    return "attachment";
+  }
+
+  /* Media is fetched with the Bearer token, then shown from an object URL: <img src>
+     and <audio src> cannot attach an Authorization header, exactly like EventSource. */
+  function loadMediaObjectUrl(ref) {
+    if (state.mediaUrls[ref.id]) { return Promise.resolve(state.mediaUrls[ref.id]); }
+    if (state.mediaPending[ref.id]) { return state.mediaPending[ref.id]; }
+    var promise = api("/api/media/" + encodeURIComponent(ref.id)).then(function (res) {
+      if (!res.ok) { throw new Error("media " + res.status); }
+      return res.blob();
+    }).then(function (blob) {
+      var url = URL.createObjectURL(blob);
+      state.mediaUrls[ref.id] = url;
+      delete state.mediaPending[ref.id];
+      return url;
+    }).catch(function (err) {
+      delete state.mediaPending[ref.id];
+      state.mediaErrors[ref.id] = err && err.message ? err.message : "load failed";
+      throw err;
+    });
+    state.mediaPending[ref.id] = promise;
+    return promise;
+  }
+
+  function drawShape(ctx, shape) {
+    ctx.save();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#d40000";
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    if (shape.tool === "box") {
+      var x = Math.min(shape.x0, shape.x1);
+      var y = Math.min(shape.y0, shape.y1);
+      ctx.strokeRect(x, y, Math.abs(shape.x1 - shape.x0), Math.abs(shape.y1 - shape.y0));
+    } else if (shape.tool === "draw" && shape.points && shape.points.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(shape.points[0].x, shape.points[0].y);
+      for (var i = 1; i < shape.points.length; i++) { ctx.lineTo(shape.points[i].x, shape.points[i].y); }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function toolButton(tool, label) {
+    var b = el("button", null, label);
+    b.type = "button";
+    b.setAttribute("aria-pressed", state.tool === tool ? "true" : "false");
+    b.addEventListener("click", function () { state.tool = tool; render(); });
+    return b;
+  }
+
+  /* The expanded image is a canvas you draw on. The base image lives offscreen so a
+     repaint can restore it under the committed shapes plus the in-progress stroke. */
+  function buildImageCanvas(ref, url) {
+    var wrap = el("div", "media-canvas-wrap");
+    var tools = el("div", "media-tools");
+    tools.appendChild(toolButton("box", "Box"));
+    tools.appendChild(toolButton("draw", "Draw"));
+    var clear = el("button", null, "Clear markup");
+    clear.type = "button";
+    clear.addEventListener("click", function () {
+      state.shapes[ref.id] = [];
+      render();
+    });
+    tools.appendChild(clear);
+    tools.appendChild(el("span", "media-status", "Draw to mark up; markup is sent with your answer."));
+    wrap.appendChild(tools);
+
+    var canvas = document.createElement("canvas");
+    canvas.id = "canvas-" + ref.id;
+    canvas.setAttribute("aria-label", (ref.filename || "attached image") + ". Draw on the image to annotate it.");
+    wrap.appendChild(canvas);
+
+    var base = document.createElement("canvas");
+    var current = null;
+    var drawing = false;
+
+    function repaint() {
+      var ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(base, 0, 0);
+      var shapes = state.shapes[ref.id] || [];
+      for (var i = 0; i < shapes.length; i++) { drawShape(ctx, shapes[i]); }
+      if (current) { drawShape(ctx, current); }
+    }
+
+    function toCanvas(e) {
+      var rect = canvas.getBoundingClientRect();
+      return {
+        x: (e.clientX - rect.left) * (canvas.width / rect.width),
+        y: (e.clientY - rect.top) * (canvas.height / rect.height)
+      };
+    }
+
+    function endStroke() {
+      if (!drawing) { return; }
+      drawing = false;
+      state.drawing = false;
+      if (current) {
+        state.shapes[ref.id] = (state.shapes[ref.id] || []).concat([current]);
+        current = null;
+      }
+      repaint();
+      if (state.renderQueued) { state.renderQueued = false; render(); }
+    }
+
+    canvas.addEventListener("pointerdown", function (e) {
+      if (e.button !== undefined && e.button !== 0) { return; }
+      drawing = true;
+      state.drawing = true;
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not fatal */ }
+      var p = toCanvas(e);
+      current = state.tool === "box"
+        ? { tool: "box", x0: p.x, y0: p.y, x1: p.x, y1: p.y }
+        : { tool: "draw", points: [p] };
+      repaint();
+      e.preventDefault();
+    });
+    canvas.addEventListener("pointermove", function (e) {
+      if (!drawing || !current) { return; }
+      var p = toCanvas(e);
+      if (current.tool === "box") { current.x1 = p.x; current.y1 = p.y; }
+      else { current.points.push(p); }
+      repaint();
+      e.preventDefault();
+    });
+    canvas.addEventListener("pointerup", endStroke);
+    canvas.addEventListener("pointercancel", endStroke);
+
+    var img = new Image();
+    img.onload = function () {
+      var maxDim = 2400;
+      var scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      // Shapes are captured in canvas pixels; record the ratio so an annotated copy
+      // rendered at natural size can scale them back up.
+      state.canvasScale[ref.id] = canvas.width / img.naturalWidth;
+      base.width = canvas.width;
+      base.height = canvas.height;
+      base.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      repaint();
+    };
+    img.src = url;
+    return wrap;
+  }
+
+  /* A player/stage for one attachment. Loads lazily on first mount; re-mounts are free
+     because the object URL is cached in state. */
+  function mountMedia(ref, ticket, isRecent) {
+    var stage = el("div", "media-stage");
+    stage.setAttribute("data-media-stage", "1");
+
+    function build() {
+      var url = state.mediaUrls[ref.id];
+      if (ref.kind === "image" && !isRecent) {
+        return buildImageCanvas(ref, url);
+      }
+      if (ref.kind === "image") {
+        var img = document.createElement("img");
+        img.alt = ref.filename || "attached image";
+        img.src = url;
+        return img;
+      }
+      var node = document.createElement(ref.kind === "audio" ? "audio" : "video");
+      node.controls = true;
+      node.id = "player-" + ref.id;
+      node.preload = "metadata";
+      node.src = url;
+      return node;
+    }
+
+    function refresh() {
+      stage.textContent = "";
+      if (state.mediaUrls[ref.id]) {
+        stage.appendChild(build());
+        return;
+      }
+      if (state.mediaErrors[ref.id]) {
+        stage.appendChild(el("div", "media-status", "Could not load attachment: " + state.mediaErrors[ref.id]));
+        return;
+      }
+      stage.appendChild(el("div", "media-status", "Loading " + ref.kind + "…"));
+    }
+
+    refresh();
+    if (!state.mediaUrls[ref.id] && !state.mediaErrors[ref.id]) {
+      loadMediaObjectUrl(ref).then(refresh, refresh);
+    }
+    return stage;
+  }
+
+  function buildMediaItem(ref, ticket, isRecent, index) {
+    var fig = el("figure", "media-item");
+    fig.setAttribute("data-media-item", ref.id);
+    var name = ref.filename || ("attachment " + (index + 1) + " (" + ref.kind + ")");
+    fig.appendChild(el("figcaption", null, name + " · " + ref.mime_type + " · " + formatBytes(ref.size_bytes)));
+    if (ref.caption) { fig.appendChild(el("div", "media-status", ref.caption)); }
+    fig.appendChild(mountMedia(ref, ticket, isRecent));
+    return fig;
+  }
+
+  function addNote(ticketId, note) {
+    if (!state.notes[ticketId]) { state.notes[ticketId] = []; }
+    state.notes[ticketId].push(note);
+    // Clear the field itself, not just the draft: render() re-captures the input's
+    // value at the top of the pass, so clearing only the draft would be undone.
+    var input = document.getElementById("note-" + ticketId);
+    if (input) { input.value = ""; }
+    state.noteDrafts[ticketId + ":note"] = "";
+    render();
+  }
+
+  function removeNote(ticketId, index) {
+    if (state.notes[ticketId]) { state.notes[ticketId].splice(index, 1); }
+    render();
+  }
+
+  function buildNotesList(ticket, isRecent) {
+    var list = el("div", "notes-list");
+    var notes = state.notes[ticket.id] || [];
+    if (notes.length === 0) {
+      list.appendChild(el("p", "media-status", "No annotations yet. Markup you draw and notes you add are sent back with your answer."));
+      return list;
+    }
+    notes.forEach(function (note, index) {
+      var item = el("div", "note");
+      item.appendChild(el("div", "note-text", note.text));
+      var meta = [];
+      if (note.media_id) { meta.push(mediaName(ticket, note.media_id)); }
+      if (note.at_seconds !== undefined && note.at_seconds !== null) { meta.push(formatTime(note.at_seconds)); }
+      if (meta.length) { item.appendChild(el("div", "note-meta", meta.join(" · "))); }
+      if (!isRecent) {
+        var row = el("div", "note-add");
+        var rm = el("button", null, "Remove");
+        rm.type = "button";
+        rm.addEventListener("click", function () { removeNote(ticket.id, index); });
+        row.appendChild(rm);
+        item.appendChild(row);
+      }
+      list.appendChild(item);
+    });
+    return list;
+  }
+
+  function buildNoteAdder(ticket, media) {
+    var form = el("form", "note-add");
+    form.setAttribute("novalidate", "novalidate");
+    var key = ticket.id + ":note";
+
+    var input = document.createElement("input");
+    input.type = "text";
+    input.id = "note-" + ticket.id;
+    input.setAttribute("data-notedraft", key);
+    input.setAttribute("autocomplete", "off");
+    input.setAttribute("placeholder", "Add a note");
+    input.value = state.noteDrafts[key] || "";
+    input.addEventListener("input", function () { state.noteDrafts[key] = input.value; });
+    input.addEventListener("focus", function () { state.selectedId = ticket.id; });
+
+    var select = document.createElement("select");
+    select.id = "notetarget-" + ticket.id;
+    select.setAttribute("aria-label", "Which attachment the note is about");
+    var whole = document.createElement("option");
+    whole.value = "";
+    whole.textContent = "Whole ticket";
+    select.appendChild(whole);
+    media.forEach(function (ref, i) {
+      var option = document.createElement("option");
+      option.value = ref.id;
+      option.textContent = ref.filename || ("attachment " + (i + 1) + " (" + ref.kind + ")");
+      select.appendChild(option);
+    });
+    var targetKey = ticket.id + ":notetarget";
+    if (state.noteTargets[targetKey]) { select.value = state.noteTargets[targetKey]; }
+    select.addEventListener("change", function () { state.noteTargets[targetKey] = select.value; });
+
+    var add = el("button", null, "Add note");
+    add.type = "submit";
+    form.appendChild(input);
+    form.appendChild(select);
+    form.appendChild(add);
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var text = input.value.trim();
+      if (!text) { return; }
+      var note = { text: text };
+      if (select.value) {
+        note.media_id = select.value;
+        var ref = findMedia(ticket, select.value);
+        if (ref && (ref.kind === "audio" || ref.kind === "video")) {
+          var player = document.getElementById("player-" + ref.id);
+          if (player && isFinite(player.currentTime)) { note.at_seconds = Math.round(player.currentTime * 10) / 10; }
+        }
+      }
+      addNote(ticket.id, note);
+    });
+    return form;
+  }
+
+  function buildAnnotationEditor(ticket) {
+    var media = ticket.media || [];
+    if (media.length === 0) { return null; }
+    var box = el("div", "annotations");
+    box.appendChild(el("h4", null, "Annotations (optional)"));
+    box.appendChild(buildNotesList(ticket, false));
+    box.appendChild(buildNoteAdder(ticket, media));
+    return box;
+  }
+
+  function buildAnnotationsReadonly(ticket) {
+    var annotations = ticket.annotations || [];
+    if (annotations.length === 0) { return null; }
+    var box = el("div", "annotations");
+    box.appendChild(el("h4", null, "Annotations (" + annotations.length + ")"));
+    annotations.forEach(function (a) {
+      var item = el("div", "note");
+      if (a.text) { item.appendChild(el("div", "note-text", a.text)); }
+      var meta = [];
+      if (a.media_id) { meta.push(mediaName(ticket, a.media_id)); }
+      if (a.at_seconds !== undefined && a.at_seconds !== null) { meta.push(formatTime(a.at_seconds)); }
+      if (a.annotated_media) { meta.push("annotated image"); }
+      if (meta.length) { item.appendChild(el("div", "note-meta", meta.join(" · "))); }
+      box.appendChild(item);
+      if (a.annotated_media) {
+        var fig = el("div", "annotation-image");
+        fig.appendChild(mountMedia(a.annotated_media, ticket, true));
+        box.appendChild(fig);
+      }
+    });
+    return box;
+  }
+
+  function buildMediaSection(ticket, isRecent) {
+    var media = ticket.media || [];
+    var annotations = ticket.annotations || [];
+    if (media.length === 0 && annotations.length === 0) { return null; }
+
+    var section = el("div", "media-section");
+
+    if (media.length > 0) {
+      var expanded = !!state.expanded[ticket.id];
+      var toggle = el("button", "media-toggle",
+        (expanded ? "Hide " : "Show ") + media.length + " attachment" + (media.length === 1 ? "" : "s") +
+        (isRecent ? "" : " for inspection"));
+      toggle.type = "button";
+      toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+      var list = el("div", "media-list");
+      list.hidden = !expanded;
+      if (expanded) {
+        media.forEach(function (ref, i) { list.appendChild(buildMediaItem(ref, ticket, isRecent, i)); });
+      }
+      toggle.addEventListener("click", function () {
+        state.expanded[ticket.id] = !state.expanded[ticket.id];
+        render();
+      });
+      section.appendChild(toggle);
+      section.appendChild(list);
+    }
+
+    if (isRecent) {
+      var readOnly = buildAnnotationsReadonly(ticket);
+      if (readOnly) { section.appendChild(readOnly); }
+    } else {
+      var editor = buildAnnotationEditor(ticket);
+      if (editor) { section.appendChild(editor); }
+    }
+
+    return section;
+  }
+
+  /* Render an annotated copy offscreen, independent of whether the canvas is mounted.
+     Shapes are in canvas pixels, so a fresh canvas at the image's natural size needs
+     them scaled up to match. */
+  function renderAnnotatedBlob(ref) {
+    return loadMediaObjectUrl(ref).then(function (url) {
+      return new Promise(function (resolve, reject) {
+        var img = new Image();
+        img.onload = function () {
+          var canvas = document.createElement("canvas");
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          var ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0);
+          // Shapes are in on-screen canvas pixels; the copy is at natural size, so scale
+          // by the inverse of the on-screen ratio (1 when the image was not downscaled).
+          var baseScale = state.canvasScale[ref.id] || 1;
+          var shapes = state.shapes[ref.id] || [];
+          ctx.save();
+          ctx.scale(1 / baseScale, 1 / baseScale);
+          for (var i = 0; i < shapes.length; i++) { drawShape(ctx, shapes[i]); }
+          ctx.restore();
+          canvas.toBlob(function (blob) { blob ? resolve(blob) : reject(new Error("could not render image")); }, "image/png");
+        };
+        img.onerror = function () { reject(new Error("could not load image")); };
+        img.src = url;
+      });
+    });
+  }
+
+  function blobToBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var result = String(reader.result || "");
+        var comma = result.indexOf(",");
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.onerror = function () { reject(new Error("could not read image")); };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function uploadImageBlob(blob) {
+    return blobToBase64(blob).then(function (data_base64) {
+      return api("/api/media", {
+        method: "POST",
+        body: JSON.stringify({ mime_type: "image/png", data_base64: data_base64 })
+      });
+    }).then(function (res) {
+      if (!res.ok) { throw new Error("media upload " + res.status); }
+      return res.json();
+    }).then(function (data) {
+      if (!data || !data.media || !data.media.id) { throw new Error("media upload returned no id"); }
+      return data.media.id;
+    });
+  }
+
   /* ---------------- actions ---------------- */
 
   function setCardError(id, msg) {
@@ -441,19 +967,44 @@
     var text = input ? input.value.trim() : (state.drafts[ticket.id] || "").trim();
     var choice = state.choices[ticket.id] || "";
     var answer = text || choice;
-    if (!answer) {
-      setCardError(ticket.id, "Type an answer or pick an option first.");
+
+    var notes = (state.notes[ticket.id] || []).slice();
+    var media = ticket.media || [];
+    // A media item counts as markup only if at least one shape was committed on it.
+    var marked = media.filter(function (ref) { return (state.shapes[ref.id] || []).length > 0; });
+
+    if (!answer && notes.length === 0 && marked.length === 0) {
+      setCardError(ticket.id, "Type an answer, pick an option, or add an annotation first.");
       return;
     }
-    api("/api/answer", {
-      method: "POST",
-      body: JSON.stringify({ id: ticket.id, answer: answer, answered_by: "human" })
+
+    var annotations = notes.map(function (note) {
+      var a = { text: note.text };
+      if (note.media_id) { a.media_id = note.media_id; }
+      if (note.at_seconds !== undefined && note.at_seconds !== null) { a.at_seconds = note.at_seconds; }
+      return a;
+    });
+
+    // Upload each annotated image first (with POST /api/media), then reference it by id
+    // in the answer. A missing or non-image reference is a 400, so this order matters.
+    Promise.all(marked.map(function (ref) {
+      return renderAnnotatedBlob(ref).then(uploadImageBlob).then(function (mediaId) {
+        annotations.push({ media_id: ref.id, annotated_media_id: mediaId });
+      });
+    })).then(function () {
+      return api("/api/answer", {
+        method: "POST",
+        body: JSON.stringify({ id: ticket.id, answer: answer, answered_by: "human", annotations: annotations })
+      });
     }).then(function (res) {
       if (res.status === 404) { setCardError(ticket.id, "Ticket not found (404)."); return; }
       if (res.status === 409) { setCardError(ticket.id, "Already answered (409)."); return; }
+      if (res.status === 400) { setCardError(ticket.id, "Answer rejected (400)."); return; }
       if (!res.ok) { setCardError(ticket.id, "Answer failed (" + res.status + ")."); return; }
       delete state.choices[ticket.id];
       delete state.drafts[ticket.id];
+      delete state.notes[ticket.id];
+      media.forEach(function (ref) { delete state.shapes[ref.id]; });
       return fetchTickets();
     }).catch(function (err) {
       if (err && err.unauthorized) { return; }
@@ -522,6 +1073,9 @@
 
   document.addEventListener("keydown", function (e) {
     if (isTypingTarget(e.target)) { return; }
+    // While the pointer/keyboard focus is inside a media stage (the drawing canvas, a
+    // player), the single-key shortcuts would fight the media interaction.
+    if (e.target && e.target.closest && e.target.closest("[data-media-stage]")) { return; }
     if (e.metaKey || e.ctrlKey || e.altKey) { return; }
     if (e.key === "j") { e.preventDefault(); moveSelection(1); }
     else if (e.key === "k") { e.preventDefault(); moveSelection(-1); }
@@ -536,6 +1090,13 @@
     var inputs = document.querySelectorAll("[data-draft]");
     for (var i = 0; i < inputs.length; i++) {
       state.drafts[inputs[i].getAttribute("data-draft")] = inputs[i].value;
+    }
+  }
+
+  function captureNoteDrafts() {
+    var inputs = document.querySelectorAll("[data-notedraft]");
+    for (var i = 0; i < inputs.length; i++) {
+      state.noteDrafts[inputs[i].getAttribute("data-notedraft")] = inputs[i].value;
     }
   }
 
@@ -576,6 +1137,9 @@
       var ctx = el("div", "context", ticket.context);
       card.appendChild(ctx);
     }
+
+    var mediaSection = buildMediaSection(ticket, isRecent);
+    if (mediaSection) { card.appendChild(mediaSection); }
 
     if (isRecent) {
       var ans = el("p", "question", "Answer: " + (ticket.answer || "(none)"));
@@ -644,6 +1208,7 @@
 
   function render() {
     captureDrafts();
+    captureNoteDrafts();
 
     var activeId = document.activeElement && document.activeElement.id ? document.activeElement.id : null;
     var selStart = null, selEnd = null;

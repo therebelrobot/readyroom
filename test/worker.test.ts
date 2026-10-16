@@ -15,8 +15,11 @@ import { callWorkerTool, handleRequest } from "../src/worker";
 import type { WorkerDeps, WorkerEnv } from "../src/worker";
 import { WORKER_WAIT_CLAMP_SECONDS } from "../src/core/constants";
 import { enqueue } from "../src/core/queue";
+import { bytesToBase64 } from "../src/core/media";
 import type { Ticket, ToolResult } from "../src/core/types";
 import { FakeTicketStore } from "./core/fakeStore";
+
+const IMAGE_BYTES = bytesToBase64(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
 
 const TOKEN = "test-token";
 const ORIGIN = "https://readyroom.example.workers.dev";
@@ -31,6 +34,12 @@ function deps(store: FakeTicketStore, mcpHandler?: WorkerDeps["mcpHandler"]): Wo
 
 function req(path: string, init: RequestInit = {}): Request {
   return new Request(`${ORIGIN}${path}`, init);
+}
+
+/** The first text content block. Content may also carry image/audio; these tests read text. */
+function textOf(result: ToolResult): string {
+  const first = result.content[0];
+  return first !== undefined && first.type === "text" ? first.text : "";
 }
 
 function authed(path: string, init: RequestInit = {}): Request {
@@ -212,7 +221,7 @@ test("POST /mcp/ with no stream and no explicit stream arg returns a clear error
   const result = (await response.json()) as ToolResult;
   assert.equal(result.isError, true);
 
-  const message = result.content[0]?.text ?? "";
+  const message = textOf(result);
   assert.match(message, /POST \/mcp\/\{stream\}/, "must name the path-segment way to supply the stream");
   assert.match(message, /`stream` argument/, "must name the explicit-argument way to supply the stream");
 });
@@ -287,4 +296,76 @@ test("unknown route is 404 and a known route with the wrong method is 405", asyn
   const wrongMethod = await handleRequest(req("/api/answer"), env(), deps(store));
   assert.equal(wrongMethod.status, 405);
   assert.equal(wrongMethod.headers.get("allow"), "POST");
+});
+
+/* ------------------------------------------------------------------ *
+ * Media and annotations
+ * ------------------------------------------------------------------ */
+
+test("POST /api/media and GET /api/media/{id} round-trip through the Worker router", async () => {
+  const store = new FakeTicketStore();
+
+  const anon = await handleRequest(req("/api/media", { method: "POST" }), env(), deps(store));
+  assert.equal(anon.status, 401, "media upload must require the token");
+
+  const upload = await handleRequest(
+    postJson("/api/media", { mime_type: "image/png", data_base64: IMAGE_BYTES }),
+    env(),
+    deps(store),
+  );
+  assert.equal(upload.status, 201);
+  const body = (await upload.json()) as { media: { id: string; kind: string } };
+  assert.equal(body.media.kind, "image");
+
+  const served = await handleRequest(authed(`/api/media/${body.media.id}`), env(), deps(store));
+  assert.equal(served.status, 200);
+  assert.match(served.headers.get("content-type") ?? "", /image\/png/);
+  assert.deepEqual([...new Uint8Array(await served.arrayBuffer())], [137, 80, 78, 71, 13, 10, 26, 10]);
+
+  const missing = await handleRequest(authed("/api/media/does-not-exist"), env(), deps(store));
+  assert.equal(missing.status, 404);
+
+  const wrongMethod = await handleRequest(authed("/api/media"), env(), deps(store));
+  assert.equal(wrongMethod.status, 405);
+});
+
+test("POST /api/answer accepts annotations and records them on the ticket", async () => {
+  const store = new FakeTicketStore();
+
+  const ticket = await enqueue(
+    store,
+    { question: "Look?", media: [{ mime_type: "image/png", data_base64: IMAGE_BYTES }] },
+    { defaultStream: "alpha", now: new Date().toISOString() },
+  );
+  const upload = await handleRequest(
+    postJson("/api/media", { mime_type: "image/png", data_base64: IMAGE_BYTES }),
+    env(),
+    deps(store),
+  );
+  const rendered = (await upload.json()) as { media: { id: string } };
+
+  const answered = await handleRequest(
+    postJson("/api/answer", {
+      id: ticket.id,
+      answer: "ship it",
+      annotations: [{ annotated_media_id: rendered.media.id, media_id: ticket.media![0].id }],
+    }),
+    env(),
+    deps(store),
+  );
+  assert.equal(answered.status, 200);
+  const body = (await answered.json()) as { ticket: Ticket };
+  assert.equal(body.ticket.annotations?.length, 1);
+  assert.equal(body.ticket.annotations?.[0].annotated_media?.id, rendered.media.id);
+});
+
+test("POST /api/answer with neither text nor annotations is 400 on the Worker", async () => {
+  const store = new FakeTicketStore();
+  const ticket = await enqueue(
+    store,
+    { question: "Look?" },
+    { defaultStream: "alpha", now: new Date().toISOString() },
+  );
+  const response = await handleRequest(postJson("/api/answer", { id: ticket.id, answer: "" }), env(), deps(store));
+  assert.equal(response.status, 400);
 });

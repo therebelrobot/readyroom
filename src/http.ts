@@ -8,8 +8,10 @@
  *   GET  /                    -> 200 text/html, the readyroom page
  *   GET  /api/tickets         -> 200 { tickets }           (Bearer)
  *   GET  /api/events          -> text/event-stream          (Bearer)
- *   POST /api/answer          -> 200 | 404 | 409            (Bearer)
+ *   POST /api/answer          -> 200 | 400 | 404 | 409      (Bearer)
  *   POST /api/undo            -> 200 | 409                  (Bearer)
+ *   POST /api/media           -> 201 { media }              (Bearer)  upload a blob
+ *   GET  /api/media/{id}      -> 200 the bytes | 404        (Bearer)  serve a blob
  *   POST /internal/tool-call  -> the ToolResult JSON        (Bearer when a token is set)
  *   /mcp                      -> delegated to the MCP transport (Origin-guarded)
  *
@@ -26,18 +28,26 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import page from "../public/index.html";
-import { QueueError, answer as answerTicket, listForPage, listResolved, undo as undoTicket } from "./core/queue";
+import { MAX_BODY_BYTES } from "./core/constants";
+import { base64ToBytes, isSafeMediaId } from "./core/media";
+import {
+  QueueError,
+  answer as answerTicket,
+  listForPage,
+  listResolved,
+  undo as undoTicket,
+  uploadMedia,
+} from "./core/queue";
 import { handleToolCall } from "./core/tools";
 import type { ToolResult } from "./core/types";
 import type { TicketStore } from "./core/types";
+import { ValidationError, validateAnnotationInputs, validateMediaUpload } from "./core/validation";
 import { requireBearer } from "./security";
 
 /** How often the SSE layer checks for newly-lazy-expired tickets to broadcast. */
 const SWEEP_MS = 5_000;
 /** How often a comment frame keeps the SSE connection warm through proxies. */
 const HEARTBEAT_MS = 25_000;
-/** Upper bound on a request body, so a hostile client cannot exhaust memory. */
-const MAX_BODY_BYTES = 1_000_000;
 
 /** A response-ready HTTP error. `handle` maps `.status` onto the response code. */
 class HttpError extends Error {
@@ -228,14 +238,74 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
 
   async function handleAnswer(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJsonBody(req);
-    if (!isRecord(body) || typeof body["id"] !== "string" || typeof body["answer"] !== "string") {
-      throw new HttpError(400, "body must be { id: string, answer: string, answered_by?: string }");
+    if (!isRecord(body) || typeof body["id"] !== "string") {
+      throw new HttpError(
+        400,
+        "body must be { id: string, answer?: string, answered_by?: string, annotations?: AnnotationInput[] }",
+      );
+    }
+    const rawAnswer = body["answer"];
+    if (rawAnswer !== undefined && rawAnswer !== null && typeof rawAnswer !== "string") {
+      throw new HttpError(400, "`answer` must be a string when present");
     }
     const answeredBy = body["answered_by"] === "default" ? "default" : "human";
 
-    const ticket = await answerTicket(store, body["id"], body["answer"], answeredBy, now());
+    let annotations;
+    try {
+      annotations = validateAnnotationInputs(body["annotations"]);
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        throw new HttpError(400, error.message);
+      }
+      throw error;
+    }
+
+    const ticket = await answerTicket(
+      store,
+      body["id"],
+      typeof rawAnswer === "string" ? rawAnswer : "",
+      answeredBy,
+      now(),
+      annotations,
+    );
     broadcast();
     sendJson(res, 200, { ticket });
+  }
+
+  /** `POST /api/media` — store a blob (a rendered annotation copy) and return its ref. */
+  async function handleMediaUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = await readJsonBody(req);
+    let input;
+    try {
+      input = validateMediaUpload(body);
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        throw new HttpError(400, error.message);
+      }
+      throw error;
+    }
+    const media = await uploadMedia(store, input, now());
+    sendJson(res, 201, { media });
+  }
+
+  /** `GET /api/media/{id}` — serve a stored blob with its content type. */
+  async function handleMediaGet(res: ServerResponse, id: string): Promise<void> {
+    if (!isSafeMediaId(id)) {
+      sendText(res, 404, "Not Found");
+      return;
+    }
+    const blob = await store.getMedia(id);
+    if (blob === undefined) {
+      sendText(res, 404, "Not Found");
+      return;
+    }
+    const bytes = Buffer.from(base64ToBytes(blob.data_base64));
+    res.writeHead(200, {
+      "content-type": blob.mime_type,
+      "content-length": bytes.length,
+      "cache-control": "no-store",
+    });
+    res.end(bytes);
   }
 
   async function handleUndo(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -285,6 +355,40 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
         return;
       }
       await mcpHandler(req, res);
+      return;
+    }
+
+    // Media routes carry an id in the path, so they are matched before the exact table.
+    if (path === "/api/media") {
+      if (method !== "POST") {
+        res.writeHead(405, { allow: "POST" });
+        res.end("Method Not Allowed");
+        return;
+      }
+      if (!requireBearer(req, token)) {
+        sendText(res, 401, "Unauthorized");
+        return;
+      }
+      await handleMediaUpload(req, res);
+      return;
+    }
+    if (path.startsWith("/api/media/")) {
+      if (method !== "GET") {
+        res.writeHead(405, { allow: "GET" });
+        res.end("Method Not Allowed");
+        return;
+      }
+      if (!requireBearer(req, token)) {
+        sendText(res, 401, "Unauthorized");
+        return;
+      }
+      let id: string;
+      try {
+        id = decodeURIComponent(path.slice("/api/media/".length));
+      } catch {
+        id = path.slice("/api/media/".length);
+      }
+      await handleMediaGet(res, id);
       return;
     }
 

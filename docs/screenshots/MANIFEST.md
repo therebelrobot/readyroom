@@ -29,9 +29,11 @@ the two `mobile-*` shots.
 | `pending-single.png` | One pending ticket with free-text context (line breaks preserved), a normal-urgency badge, and the free-text answer form. |
 | `pending-options.png` | A ticket with mutually-exclusive option buttons (`1. Save` / `2. Apply` / `3. Confirm`) and a blocking-urgency badge, above a second free-text ticket. |
 | `pending-multi-stream.png` | Tickets from three streams (`docs-pipeline`, `web-client`, `api-server`), grouped under stream headings, newest stream first; shows the dotted (low), double (blocking) and solid (normal) urgency badges. |
+| `pending-media.png` | A ticket with an attached screenshot, expanded for inspection: the attachment's name/MIME/size, its caption, the image on a drawing canvas with `Box`/`Draw`/`Clear markup` tools, and the optional annotations editor. Element-scoped to the card. |
 | `mobile-pending.png` | The populated multi-stream queue at phone width. |
 | `option-selected.png` | An option picked: the card gains a thick left border and a `SELECTED` text marker, and the chosen option button is pressed. |
-| `card-error.png` | Submitting an empty answer shows the inline, per-card validation error "Type an answer or pick an option first." |
+| `media-annotated.png` | The same attachment marked up with a drawn box, plus a queued note ("nudge the title left by 8px") in the annotations editor. Element-scoped to the card. |
+| `card-error.png` | Submitting an empty answer shows the inline, per-card validation error "Type an answer, pick an option, or add an annotation first." |
 | `recent-answered.png` | An answered ticket in the "Recent (undoable for 5 minutes)" section: dashed border, `STATUS: ANSWERED` badge, `by human`, the recorded answer, and the Undo button. |
 | `token-rejected.png` | A wrong token was saved: the 401 error banner "Token rejected (401). Enter it again." with the token bar shown again. |
 | `status-polling.png` | The `/api/events` SSE endpoint is unavailable, so the page fell back to "polling every 5s" (the Worker target's live-update path). |

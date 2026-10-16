@@ -73,6 +73,17 @@ moments, desktop first:
 
 <table>
 <tr>
+<td align="center"><b>Attached media, expanded</b></td>
+<td align="center"><b>Marked up and annotated</b></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/pending-media.png" width="280" alt="A ticket with an attached screenshot expanded for inspection: the image on a drawing canvas with Box, Draw, and Clear markup tools, above the optional annotations editor."></td>
+<td><img src="docs/screenshots/media-annotated.png" width="280" alt="The attached image marked up with a red box, and a queued note reading 'nudge the title left by 8px' in the annotations editor."></td>
+</tr>
+</table>
+
+<table>
+<tr>
 <td align="center"><b>Token gate</b></td>
 <td align="center"><b>Token rejected (401)</b></td>
 <td align="center"><b>Polling fallback</b></td>
@@ -144,8 +155,14 @@ ask_human({
                               // when it is safe for the agent to proceed without a human.
   timeout_seconds?: number,   // optional. Default 1800. Max 86400.
   urgency?: "low" | "normal" | "blocking",  // optional. Default "normal".
-  stream?: string             // optional. Overrides the env/basename default.
-}) => { id: string, status: "pending", expires_at: string }
+  stream?: string,            // optional. Overrides the env/basename default.
+  media?: Array<{             // optional. Screenshots, audio, or video for the human to inspect.
+    mime_type: string,        //   an image/*, audio/*, or video/* type
+    data_base64: string,      //   standard base64 (a `data:<mime>;base64,` prefix is accepted)
+    filename?: string,
+    caption?: string
+  }>
+}) => { id: string, status: "pending", expires_at: string, media?: MediaRef[] }
 ```
 
 ### `wait_for_answer`
@@ -159,12 +176,18 @@ wait_for_answer({
   timeout_seconds?: number    // default 60, max 600
 }) => {
   id: string,
-  status: "pending" | "answered" | "expired",
+  status: "pending" | "answered" | "expired" | "cancelled",
   answer?: string,
   answered_by?: string,       // "human" | "default"
-  answered_at?: string
+  answered_at?: string,
+  media?: MediaRef[],         // the media you attached, echoed back
+  annotations?: Annotation[]  // the human's notes and any rendered markup copy
 }
 ```
+
+When the human drew on an attached image, the annotated copy is returned **as MCP `image`
+content** alongside the text, so an agent that only speaks MCP can see the markup without
+fetching a URL. `annotations[].annotated_media` also names a blob under `GET /api/media/{id}`.
 
 ### `list_pending`
 
@@ -188,6 +211,30 @@ A delivered human answer is prefixed with `HUMAN ANSWER:` so a model can never c
 its own earlier guess. An answer that came from `default_answer` gets a clearly different
 prefix — `DEFAULT ANSWER (applied on expiry; no human responded):` — because labelling the
 agent's own default as a human answer would be worse than no prefix at all.
+
+## Media and annotations
+
+Media is **optional**: most tickets have none, and a ticket with media is answered exactly like
+one without. Attach it with `ask_human`'s `media` array (up to 8 items, 8 MiB each, 24 MiB per
+ticket) when a decision needs a screenshot, a clip, or a recording rather than words.
+
+- **Stored out of band.** The bytes live in a media store, keyed by an id; the ticket carries
+  only a `MediaRef` (kind, MIME type, filename, caption, size). `GET /api/tickets` and
+  `tickets.json` therefore stay small, and the page fetches a blob only when you expand a card.
+- **Served same-origin.** `GET /api/media/{id}` returns the bytes under the same Bearer auth as
+  every other `/api/*` route. Nothing is fetched from an external origin.
+- **Expand and inspect.** Each attachment is collapsed behind a *Show N attachments* toggle.
+  Images open on a drawing canvas (`Box`, `Draw`, `Clear markup`); audio and video get a player.
+- **Annotate and send back.** The human can mark up an image and add notes (notes on audio/video
+  capture the playhead position). On **Answer**, a marked-up image is rendered to a PNG, uploaded
+  with `POST /api/media`, and referenced from the answer. Annotations are **optional**: the human
+  may answer with text, a chosen option, annotations, or any combination — but not nothing.
+- **Back to the agent.** `wait_for_answer` returns the annotations as structured fields, and any
+  rendered markup as MCP `image` content, so the agent sees exactly what the human marked.
+
+The three targets share the behaviour; only the storage differs. `FileTicketStore` writes blobs
+under `${READYROOM_STATE_DIR}/media/`, and `DurableObjectTicketStore` chunks each blob across rows
+because a Cloudflare SQLite row is capped at 2 MB.
 
 ## Three ways aboard
 
@@ -631,7 +678,8 @@ network otherwise cut. It is inlined at build time into each target's bundle.
 - **Grouped by stream.** Tickets grouped under a stream heading, newest stream first. You need
   to know which agent is asking.
 - **Card contents.** Stream name, ticket age (`4m`), urgency badge, the question, the context,
-  option buttons, a free-text field, and an Answer button.
+  any attached media behind an expand-for-inspection toggle (with drawing and notes), option
+  buttons, a free-text field, and an Answer button.
 - **Keyboard-first.** `j`/`k` move between tickets, `1`-`5` pick an option, `Enter` submits, `u`
   undoes the last answer. Draining a queue with a mouse is the slow path.
 - **Tab title carries the count.** `(3) readyroom`.
@@ -655,8 +703,10 @@ GET  /healthz          -> 200, body "ok"
 GET  /                 -> the readyroom page (index.html)
 GET  /api/tickets      -> { tickets: Ticket[] }   pending + last 5 min of answered
 GET  /api/events       -> text/event-stream of ticket changes   (501 on the Worker)
-POST /api/answer       -> { id, answer, answered_by? } -> 200 | 404 | 409 already answered
+POST /api/answer       -> { id, answer?, answered_by?, annotations? } -> 200 | 400 | 404 | 409
 POST /api/undo         -> { id } -> 200 | 409 outside the undo window
+POST /api/media        -> { mime_type, data_base64 } -> 201 { media: MediaRef }
+GET  /api/media/{id}   -> the blob bytes (Content-Type from the stored MIME) | 404
 POST /mcp/{stream}     -> the Streamable HTTP MCP endpoint (Origin-guarded)
 ```
 

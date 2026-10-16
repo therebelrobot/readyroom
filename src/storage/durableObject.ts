@@ -26,7 +26,8 @@
  * All logging goes to stderr. Nothing is written to stdout.
  */
 
-import type { AuditEntry, Status, Ticket, TicketStore } from "../core/types";
+import { base64ByteLength, base64ToBytes, chunkBase64, isSafeMediaId } from "../core/media";
+import type { AuditEntry, MediaBlob, Status, Ticket, TicketStore } from "../core/types";
 import type { DurableObjectState, SqlStorage } from "../worker-types";
 
 const CREATE_TICKETS = `CREATE TABLE IF NOT EXISTS tickets (
@@ -42,6 +43,29 @@ const CREATE_AUDIT = `CREATE TABLE IF NOT EXISTS audit (
   action TEXT NOT NULL,
   at TEXT NOT NULL,
   data TEXT NOT NULL
+)`;
+
+/**
+ * Media metadata. The bytes live in `media_chunk`, because Cloudflare caps a SQLite
+ * string/BLOB/row at 2 MB and a video attachment can exceed that.
+ */
+const CREATE_MEDIA_META = `CREATE TABLE IF NOT EXISTS media_meta (
+  id TEXT PRIMARY KEY,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  chunk_count INTEGER NOT NULL
+)`;
+
+/**
+ * Media bytes, one base64 chunk per row. `MEDIA_CHUNK_BYTES` is a multiple of 3, so
+ * each non-final chunk encodes without padding and the stored chunk strings
+ * concatenate into the base64 of the whole blob with no decode/re-encode on read.
+ */
+const CREATE_MEDIA_CHUNK = `CREATE TABLE IF NOT EXISTS media_chunk (
+  media_id TEXT NOT NULL,
+  idx INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (media_id, idx)
 )`;
 
 export class DurableObjectTicketStore implements TicketStore {
@@ -60,6 +84,8 @@ export class DurableObjectTicketStore implements TicketStore {
     }
     this.sql.exec(CREATE_TICKETS);
     this.sql.exec(CREATE_AUDIT);
+    this.sql.exec(CREATE_MEDIA_META);
+    this.sql.exec(CREATE_MEDIA_CHUNK);
     this.ready = true;
   }
 
@@ -129,5 +155,69 @@ export class DurableObjectTicketStore implements TicketStore {
       entry.at,
       JSON.stringify(entry),
     );
+  }
+
+  /** Store a media blob as metadata plus one or more rows. Idempotent per id. */
+  async putMedia(blob: MediaBlob): Promise<void> {
+    this.ensure();
+    if (!isSafeMediaId(blob.id)) {
+      throw new Error(`refusing to store media under an unsafe id: ${blob.id}`);
+    }
+
+    const chunks = chunkBase64(blob.data_base64);
+
+    // Replace any prior bytes for this id, then write the new set.
+    this.sql.exec("DELETE FROM media_chunk WHERE media_id = ?", blob.id);
+    this.sql.exec(
+      `INSERT INTO media_meta (id, mime_type, size_bytes, chunk_count) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         mime_type = excluded.mime_type,
+         size_bytes = excluded.size_bytes,
+         chunk_count = excluded.chunk_count`,
+      blob.id,
+      blob.mime_type,
+      base64ByteLength(blob.data_base64),
+      chunks.length,
+    );
+    for (let index = 0; index < chunks.length; index += 1) {
+      this.sql.exec(
+        "INSERT INTO media_chunk (media_id, idx, data) VALUES (?, ?, ?)",
+        blob.id,
+        index,
+        chunks[index]!,
+      );
+    }
+  }
+
+  /**
+   * Read a blob. A missing meta row, or a chunk set that does not match `chunk_count`
+   * (a write interrupted partway), resolves to `undefined` rather than returning a
+   * truncated blob.
+   */
+  async getMedia(id: string): Promise<MediaBlob | undefined> {
+    this.ensure();
+    if (!isSafeMediaId(id)) {
+      return undefined;
+    }
+
+    const metaRows = this.sql
+      .exec<{ mime_type: string; chunk_count: number }>(
+        "SELECT mime_type, chunk_count FROM media_meta WHERE id = ?",
+        id,
+      )
+      .toArray();
+    const meta = metaRows[0];
+    if (meta === undefined) {
+      return undefined;
+    }
+
+    const chunkRows = this.sql
+      .exec<{ data: string }>("SELECT data FROM media_chunk WHERE media_id = ? ORDER BY idx ASC", id)
+      .toArray();
+    if (chunkRows.length !== meta.chunk_count) {
+      return undefined;
+    }
+
+    return { id, mime_type: meta.mime_type, data_base64: chunkRows.map((row) => row.data).join("") };
   }
 }
