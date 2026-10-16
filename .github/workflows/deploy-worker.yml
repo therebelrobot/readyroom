@@ -3,6 +3,8 @@ name: Deploy Worker (optional)
 on:
   push:
     tags: ['v*']
+  # Dispatched by release.yml after semantic-release tags a release.
+  workflow_dispatch:
 
 permissions:
   contents: read

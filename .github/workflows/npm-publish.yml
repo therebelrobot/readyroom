@@ -15,6 +15,10 @@ name: npm-publish
 on:
   push:
     tags: ['v*']
+  # release.yml dispatches this on the tag semantic-release just created. A tag
+  # pushed with GITHUB_TOKEN cannot trigger a run on its own, so the release
+  # workflow fans out to us explicitly.
+  workflow_dispatch:
 
 permissions: {}
 

@@ -715,18 +715,22 @@ Unknown route -> `404`. Known route, wrong method -> `405`. The Node target addi
 
 ## CI/CD
 
-Four GitHub Actions workflows:
+Five GitHub Actions workflows:
 
+- **`.github/workflows/release.yml`** — on every push to `main` (that is, every merged PR): runs
+  [semantic-release](https://semantic-release.gitbook.io) over the conventional-commit messages
+  since the last tag, then versions, changelogs, tags, and publishes the release. It is the
+  entry point; the four below are its downstream stages.
 - **`.github/workflows/ci.yml`** — on push and PR: `npm ci`, typecheck, build,
   `wrangler deploy --dry-run`, `docker build`.
 - **`.github/workflows/publish.yml`** — on the default branch and `v*` tags: buildx for
   `linux/amd64,linux/arm64` (arm64 is required; the deploy target is a Pi), push to GHCR, auth
   via the built-in `GITHUB_TOKEN` with `packages: write` (no PAT, no repo secrets),
-  `docker/metadata-action` tags (`latest` on the default branch, semver on `v*`, `sha-<short>`),
-  GHA build cache scoped per image, one matrix entry per image. Supply chain:
+  `docker/metadata-action` tags (`latest` on the default branch and on `v*`, semver on `v*`,
+  `sha-<short>`), GHA build cache scoped per image, one matrix entry per image. Supply chain:
   `provenance: mode=max`, `sbom: true`, and `actions/attest-build-provenance` pushed to the
   registry.
-- **`.github/workflows/publish-npm.yml`** — on `v*` tags: `npm publish` with provenance, using
+- **`.github/workflows/npm-publish.yml`** — on `v*` tags: `npm publish` with provenance, using
   npm Trusted Publishing (OIDC) rather than a stored token. It needs `id-token: write` and the
   trusted-publisher entry configured on the package.
 - **`.github/workflows/deploy-worker.yml`** — on `v*` tags: `wrangler deploy` with
@@ -736,6 +740,48 @@ Four GitHub Actions workflows:
   deploy token is supplied.
 
 `.github/dependabot.yml` covers `github-actions`, `npm`, and `docker`.
+
+### Releasing
+
+Merging a PR to `main` cuts the release. There is no version to bump and no tag to push:
+`release.yml` runs [semantic-release](https://semantic-release.gitbook.io), which reads the
+commit messages since the last release and picks the version by the usual convention:
+
+| Commit | Version bump |
+| --- | --- |
+| `fix: …` | patch |
+| `feat: …` | minor |
+| any type carrying a `BREAKING CHANGE:` footer | minor while `0.x`, major from `1.0` |
+| `docs:`, `chore:`, `refactor:`, `test:`, … | no release |
+
+It writes `CHANGELOG.md` and the new version into `package.json`, commits them
+(`chore(release): vX.Y.Z [skip ci]`), tags `vX.Y.Z`, and opens the GitHub Release. A merge whose
+commits are all non-releasing finishes green and publishes nothing.
+
+**Pre-1.0 behaviour.** While the version is still `0.x`, a breaking change bumps **minor** rather
+than major, so a `BREAKING CHANGE:` never jumps you to 1.0.0 by surprise. That downgrade lives in
+`release.config.js` and switches itself off the moment the current version's major is no longer
+`0`. To reach 1.0 deliberately, run `npm run release:major` — it bumps and tags `v1.0.0` — and
+from the next release on breaking changes bump major again.
+
+**Why the release workflow dispatches the others instead of leaning on the tag.** A tag pushed
+by a workflow's built-in `GITHUB_TOKEN` does not start other workflows: GitHub suppresses runs
+for events caused by `GITHUB_TOKEN` to prevent recursion, so the `v*` triggers above would stay
+silent. `workflow_dispatch` is the one event that rule exempts, so `release.yml` dispatches
+`npm-publish.yml`, `publish.yml`, and (when enabled) `deploy-worker.yml` on the new tag itself.
+The whole pipeline therefore runs on the built-in token — **no PAT and no repo secret**. If you
+ever switch `release.yml` to a PAT or a GitHub App token, remove that dispatch step, or the tag
+trigger and the dispatch will both fire.
+
+The `npm run release:patch|minor|major` scripts still work as a manual fallback — they push a
+tag, and the `v*` triggers pick it up — but with semantic-release they are no longer part of the
+normal flow.
+
+semantic-release, `@semantic-release/changelog`, and `@semantic-release/git` are
+devDependencies; the other release plugins resolve from semantic-release itself. The release job
+deliberately does **not** request `id-token: write`, so the OIDC token never sits beside
+installed dependency code: publishing stays in `npm-publish.yml`, whose two-job split keeps the
+token out of the build.
 
 ### npm publishing
 
