@@ -40,6 +40,7 @@
     "deploy:worker": "wrangler deploy",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --import ./scripts/html-loader-register.mjs --import tsx --test test/*.test.ts test/core/*.test.ts test/storage/*.test.ts",
+    "screenshots": "bash scripts/capture-screenshots.sh",
     "docker:build": "docker build -t ghcr.io/therebelrobot/readyroom:local .",
     "docker:run": "docker run --rm -d -p 127.0.0.1:8971:8971 -v $(pwd)/.state:/app/.state --env-file .env ghcr.io/therebelrobot/readyroom:local",
     "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/therebelrobot/readyroom:latest --push .",

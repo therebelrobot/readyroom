@@ -5,3 +5,6 @@ dist/
 .dev.vars
 *.log
 .wrangler/
+.playwright-cli/
+.roo/
+.vscode/

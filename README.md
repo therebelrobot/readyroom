@@ -50,6 +50,54 @@ share one place to ask and one place for you to answer.
 - **Three ways to run it, one program.** `npx` for one machine, Docker for an always-on box,
   a Cloudflare Worker for when your agents cannot reach either.
 
+## Screenshots
+
+The page is one flow — the human draining the queue — and one authenticated role, so every
+capture is a *state* of that single flow rather than a role of its own. A few representative
+moments, desktop first:
+
+<table>
+<tr>
+<td align="center"><b>Queue, grouped by stream</b></td>
+<td align="center"><b>Options and free text</b></td>
+<td align="center"><b>Option selected</b></td>
+<td align="center"><b>Recent (undoable 5 min)</b></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/pending-multi-stream.png" width="280" alt="Pending queue grouped by stream heading, with dotted low, double blocking, and solid normal urgency badges."></td>
+<td><img src="docs/screenshots/pending-options.png" width="280" alt="A blocking-urgency ticket with option buttons above a second free-text ticket."></td>
+<td><img src="docs/screenshots/option-selected.png" width="280" alt="A ticket with an option picked, showing a thick left border, a SELECTED marker, and the option button pressed."></td>
+<td><img src="docs/screenshots/recent-answered.png" width="280" alt="An answered ticket in the Recent section with a dashed border, STATUS: ANSWERED badge, the recorded answer, and an Undo button."></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td align="center"><b>Token gate</b></td>
+<td align="center"><b>Token rejected (401)</b></td>
+<td align="center"><b>Polling fallback</b></td>
+<td align="center"><b>Phone width</b></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/token-gate.png" width="280" alt="First paint with no token: the token bar is visible and the status reads waiting for token."></td>
+<td><img src="docs/screenshots/token-rejected.png" width="280" alt="A wrong token was saved: a Token rejected (401) error banner with the token bar shown again."></td>
+<td><img src="docs/screenshots/status-polling.png" width="280" alt="The SSE endpoint is unavailable, so the status reads polling every 5s."></td>
+<td><img src="docs/screenshots/mobile-pending.png" width="150" alt="The populated multi-stream queue at phone width."></td>
+</tr>
+</table>
+
+There is also an empty board, an inline per-card validation error, and a failed-load banner —
+the page is captured at `1280x800` (desktop) and `390x844` (the two `mobile-*` shots). A full set
+of every screen and state, with a one-line description of each, is in
+[`docs/screenshots/MANIFEST.md`](docs/screenshots/MANIFEST.md) — regenerate the lot with
+
+```sh
+npm run screenshots
+```
+
+which starts its own isolated readyroom on `:8972`, drives each state, and tears it down. For how
+to actually use each of these screens, see [`docs/USAGE.md`](docs/USAGE.md).
+
 ## Vocabulary
 
 These words are used exactly, in code, comments, tool descriptions, and docs. No synonyms.
@@ -213,6 +261,10 @@ services:
       - ./readyroom-state:/app/.state
 ```
 
+Copy this file to get a runnable setup without retyping it:
+[`examples/docker-compose.yml`](examples/docker-compose.yml) — set `READYROOM_TOKEN`, then
+`docker compose up -d`.
+
 The container runs the same Node entry as npx, in stdio-plus-HTTP mode, as a non-root user, and
 handles `SIGTERM`.
 
@@ -367,6 +419,34 @@ The stream is the path segment, so each agent gets its own URL.
   }
 }
 ```
+
+### Directing an agent to use readyroom (`AGENTS.md`)
+
+Paste the block below into your project's `AGENTS.md` (or `CLAUDE.md`) so the agent knows
+readyroom is available and how to reach it. It goes at the top level of that file, alongside
+your other project instructions.
+
+````markdown
+## Asking a human
+
+When you reach a decision you cannot make alone — a choice with real consequences, a
+preference only the operator holds, or anything you would otherwise guess at — ask the
+operator through the `readyroom` MCP server instead of guessing or blocking.
+
+- `ask_human` — enqueue a question and return immediately. It never waits. Pass `question`
+  (one sentence), and optionally `options` (2-5 mutually exclusive choices), `context`,
+  `default_answer`, `timeout_seconds`, `urgency`, and `stream`. It returns
+  `{ id, status: "pending" }`.
+- `wait_for_answer` — block for the human's answer to a ticket you enqueued. Pass the `id`.
+  It returns immediately if the ticket is already answered or expired; if it is still
+  pending, continue with independent work and call it again later. Do not poll in a tight loop.
+- `list_pending` — list the tickets still pending across every agent stream. Takes no arguments.
+- `cancel_ticket` — withdraw a ticket you no longer need answered. Pass the `id`.
+
+A delivered human answer is prefixed with `HUMAN ANSWER:`. An answer applied from
+`default_answer` on expiry is prefixed `DEFAULT ANSWER (applied on expiry; no human
+responded):` — never treat that as a human answer.
+````
 
 ### Auth and secrets
 
@@ -537,7 +617,9 @@ The Worker has no state dir, no bind address, and no daemon role. Three conseque
 ## The readyroom page
 
 The page is a **status board**, not a chat log. It shows what is waiting and clears when you
-have answered — which is why there is no markdown parser and no message history.
+have answered — which is why there is no markdown parser and no message history. For a
+walkthrough of opening it, reading a ticket, and answering one, see
+[`docs/USAGE.md`](docs/USAGE.md).
 
 `public/index.html`. One file, shared by all three targets. All CSS and JS inline. No CDN, no
 external origin, no build step. It renders correctly when opened from the server with the
@@ -621,6 +703,7 @@ npm run typecheck    # tsc --noEmit
 npm run build        # esbuild -> dist/server.mjs (single file, HTML inlined)
 npm run build:worker # wrangler deploy --dry-run --outdir dist/worker
 npm run dev:worker   # wrangler dev
+npm run screenshots  # capture every page state into docs/screenshots/
 ```
 
 Repo conventions:

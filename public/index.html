@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>readyroom</title>
+<!-- Suppress the /favicon.ico request. The page ships no icon and fetches nothing
+     over the network; an inline empty data URI keeps the console free of a 404. -->
+<link rel="icon" href="data:,">
 <style>
   /* No external fonts, no external origins, no images fetched over the network.
      Everything below is self-contained so the page renders with the network cut. */
@@ -549,7 +552,10 @@
   }
 
   function buildCard(ticket, isRecent) {
-    var card = el("article", "card" + (ticket.id === state.selectedId ? " selected" : ""));
+    // The `selected` marker is a keyboard-navigation affordance for the pending queue
+    // only. An answered card in "recent" carries no selection target (`j`/`k`/`Enter`
+    // never act on it), so marking it "selected" would be misleading.
+    var card = el("article", "card" + (!isRecent && ticket.id === state.selectedId ? " selected" : ""));
     card.id = "card-" + ticket.id;
     card.setAttribute("aria-label", "Ticket from " + ticket.stream + ": " + ticket.question);
 

@@ -1,0 +1,49 @@
+# readyroom — copy-paste Docker Compose example.
+#
+# Copy this file into your project (as docker-compose.yml, or merge the
+# `services:` block into an existing one), set READYROOM_TOKEN to a long random
+# secret, then run:
+#
+#   docker compose up -d
+#
+# The human console is then at http://127.0.0.1:8971/ and the Streamable HTTP
+# MCP endpoint at http://127.0.0.1:8971/mcp.
+#
+# The image is multi-arch (linux/amd64, linux/arm64), so this runs on a
+# Raspberry Pi as well as a laptop.
+
+services:
+  readyroom:
+    image: ghcr.io/therebelrobot/readyroom:latest
+    container_name: readyroom
+    # Survive reboots and crashes. The queue is on disk, so a restart keeps
+    # every pending ticket.
+    restart: unless-stopped
+    # The container runs the same Node entry as `npx readyroom`, in
+    # stdio-plus-HTTP mode. stdin_open keeps the stdio transport usable.
+    stdin_open: true
+    ports:
+      # Bind to loopback on the host. The container binds 0.0.0.0 internally,
+      # so the loopback guarantee comes from this port mapping, not the process.
+      # For LAN access, put a reverse proxy with its own auth in front and
+      # forward to 127.0.0.1:8971 — never expose the port directly.
+      - "127.0.0.1:8971:8971"
+    environment:
+      # REQUIRED. Shared secret for /api/* (the page's API) and the Node
+      # /internal/tool-call proxy. Mandatory on Docker. Change this to a long
+      # random value; treat it as a bearer secret and never commit it.
+      READYROOM_TOKEN: change-me-to-a-long-random-secret
+      # Where tickets.json, audit.jsonl, and daemon.json live inside the
+      # container. Keep this in sync with the volume mount below.
+      READYROOM_STATE_DIR: /app/.state
+      # The container must bind 0.0.0.0 to be reachable through the port
+      # mapping. A non-loopback bind requires READYROOM_TOKEN, which is set.
+      READYROOM_BIND: 0.0.0.0
+      # OPTIONAL. Comma-separated extra origins allowed on the /mcp Origin
+      # guard, appended to the server's own origins (http://127.0.0.1:8971 and
+      # http://localhost:8971). Set this only if your MCP client sends a
+      # different Origin header. Example:
+      # READYROOM_ALLOWED_ORIGINS: http://127.0.0.1:8971,http://localhost:8971
+    volumes:
+      # Persist the queue and the append-only audit log across restarts.
+      - ./readyroom-state:/app/.state
